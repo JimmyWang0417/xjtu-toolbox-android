@@ -6,12 +6,18 @@ plugins {
 
 android {
     namespace = "com.xjtu.toolbox"
-    compileSdk = 34
+    
+    // ⚠️ 保持 37 编译，用于解决 Miuix 和 新版 AndroidX 库的编译硬性要求
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.xjtu.toolbox"
         minSdk = 32
+        
+        // ⚠️ 将运行时倾向降到最稳妥的 34（Android 14）
+        // 这样既能兼容高版本的库，又能保证生成的 APK 资源和结构能被低版本环境/卓易通正确解析
         targetSdk = 34
+        
         versionCode = 23
         versionName = "3.5.1"
 
@@ -27,7 +33,6 @@ android {
                 keyAlias = System.getenv("KEY_ALIAS")
                 keyPassword = System.getenv("KEY_PASSWORD")
             } else {
-                // 本地开发：从项目根目录读取 release.jks
                 val localKeystore = rootProject.file("release.jks")
                 if (localKeystore.exists()) {
                     storeFile = localKeystore
@@ -36,6 +41,7 @@ android {
                     keyPassword = "XjtuToolbox2026!"
                 }
             }
+            // 确保双重开启 V2 和 V3 签名，提高容器解析通过率
             enableV2Signing = true
             enableV3Signing = true
         }
