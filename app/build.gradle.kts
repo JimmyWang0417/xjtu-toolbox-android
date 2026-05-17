@@ -1,20 +1,18 @@
-plugins {
-    alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.compose)
-    alias(libs.plugins.ksp)
-}
-
 android {
     namespace = "com.xjtu.toolbox"
-    compileSdk {
-        version = release(37) {
-        }
-    }
+    
+    // ⚠️ 修改1：使用标准的纯数字语法，降级到最稳定的 34 (Android 14)
+    compileSdk = 34 
 
     defaultConfig {
         applicationId = "com.xjtu.toolbox"
-        minSdk = 32
-        targetSdk = 36
+        
+        // 修改2：minSdk 保持 32 没问题，如果你想更兼容，可以改成 28
+        minSdk = 32 
+        
+        // ⚠️ 修改3：目标版本降级到 34，坚决不要写 36
+        targetSdk = 34 
+        
         versionCode = 23
         versionName = "3.5.1"
 
@@ -39,7 +37,8 @@ android {
                     keyPassword = "XjtuToolbox2026!"
                 }
             }
-            // minSdk=31 全覆盖 V3 支持范围（API≥28），强制启用以获得更强签名保护和密钥轮换能力
+            // ⚠️ 修改4：明确双重开启 V2 和 V3 签名，防止解析器找不到兼容签名
+            enableV2Signing = true 
             enableV3Signing = true
         }
     }
@@ -63,39 +62,4 @@ android {
         compose = true
         buildConfig = true
     }
-}
-
-dependencies {
-    implementation(libs.androidx.core.ktx)
-    implementation(libs.androidx.core.splashscreen)
-    implementation(libs.androidx.lifecycle.runtime.ktx)
-    implementation(libs.androidx.lifecycle.viewmodel.compose)
-    implementation(libs.androidx.activity.compose)
-    implementation(platform(libs.androidx.compose.bom))
-    implementation(libs.androidx.ui)
-    implementation(libs.androidx.ui.graphics)
-    implementation(libs.androidx.ui.tooling.preview)
-    implementation(libs.androidx.material.icons)
-    implementation(libs.okhttp)
-    implementation(libs.okhttp.brotli)
-    implementation(libs.okhttp.urlconnection)
-    implementation(libs.jsoup)
-    implementation(libs.gson)
-    implementation(libs.coroutines.android)
-    implementation(libs.navigation.compose)
-    implementation(libs.security.crypto)
-    implementation(libs.zxing.core)
-    implementation(libs.media3.exoplayer)
-    implementation(libs.media3.ui)
-    implementation(libs.androidx.room.runtime)
-    implementation(libs.androidx.room.ktx)
-    ksp(libs.androidx.room.compiler)
-    implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.1")
-    implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.1")
-    implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.1")
-    implementation("top.yukonga.miuix.kmp:miuix-blur-android:0.9.1")
-    testImplementation(libs.junit)
-    androidTestImplementation(libs.androidx.junit)
-    androidTestImplementation(libs.androidx.espresso.core)
-    debugImplementation(libs.androidx.ui.tooling)
 }
