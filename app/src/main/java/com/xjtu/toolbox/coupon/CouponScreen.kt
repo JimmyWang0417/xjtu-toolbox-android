@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.filled.Restaurant
 import androidx.compose.material.icons.outlined.ConfirmationNumber
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -83,6 +85,11 @@ fun CouponScreen(
     val scope = rememberCoroutineScope()
     val scrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
 
+    val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
+    // 首页摘要用：-1 表示本次会话还没查过该分类，不参与拼接
+    var pendingCount by remember { mutableIntStateOf(-1) }
+    var usableCount by remember { mutableIntStateOf(-1) }
+
     var selectedFilter by rememberSaveable { mutableStateOf(CouponFilter.USABLE) }
     var records by remember { mutableStateOf<List<CouponRecord>>(emptyList()) }
     var total by remember { mutableIntStateOf(0) }
@@ -91,6 +98,7 @@ fun CouponScreen(
     var isLoadingMore by remember { mutableStateOf(false) }
     var isRefreshing by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var loadMoreError by remember { mutableStateOf<String?>(null) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
     var receivingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     val pullToRefreshState = rememberPullToRefreshState()
@@ -102,6 +110,7 @@ fun CouponScreen(
             else -> isLoading = true
         }
         errorMessage = null
+        loadMoreError = null
         scope.launch {
             try {
                 val pageData = withContext(Dispatchers.IO) {
@@ -110,12 +119,34 @@ fun CouponScreen(
                 total = pageData.total
                 currentPage = page
                 records = if (append) records + pageData.records else pageData.records
+                // 顺手把摘要留给首页（首页自己不发请求，见 HomeStats）。
+                // 只在第一页、且是「可领取/可使用」这两个用户真正关心的分类时记，
+                // 「已用完/已过期」的条数写上去只会误导。
+                if (!append && filter == CouponFilter.AVAILABLE) pendingCount = pageData.total
+                if (!append && filter == CouponFilter.USABLE) usableCount = pageData.total
+                if (pendingCount >= 0 || usableCount >= 0) {
+                    val parts = buildList {
+                        if (pendingCount > 0) add("$pendingCount 个待领取")
+                        if (usableCount > 0) add("$usableCount 个待使用")
+                    }
+                    com.xjtu.toolbox.home.HomeStats.push(
+                        appContext,
+                        Routes.COUPON,
+                        parts.firstOrNull() ?: "暂无可用",
+                        parts.drop(1).firstOrNull()
+                    )
+                }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: AuthExpiredException) {
                 appLoginState.handleAuthExpired(LoginType.COUPON, Routes.COUPON, onBack)
             } catch (e: Exception) {
-                errorMessage = e.message ?: "加载失败"
+                // 翻页失败只提示，保住已加载的列表；整页失败才切到错误页
+                if (append) {
+                    loadMoreError = e.message ?: "加载更多失败"
+                } else {
+                    errorMessage = e.message ?: "加载失败"
+                }
             } finally {
                 isLoading = false
                 isLoadingMore = false
@@ -235,6 +266,8 @@ fun CouponScreen(
                         receivingIds = receivingIds,
                         onReceive = ::receiveCoupon,
                         isLoadingMore = isLoadingMore,
+                        // 翻页失败时停止自动加载，否则会对着挂掉的接口无限重试
+                        loadMoreError = loadMoreError,
                         onLoadMore = { loadPage(selectedFilter, currentPage + 1, append = true) }
                     )
                 }
@@ -249,6 +282,7 @@ private fun CouponList(
     records: List<CouponRecord>,
     total: Int,
     isLoadingMore: Boolean,
+    loadMoreError: String?,
     onLoadMore: () -> Unit,
     filter: CouponFilter,
     statusMessage: String?,
@@ -256,7 +290,24 @@ private fun CouponList(
     onReceive: (CouponRecord) -> Unit
 ) {
     val leftAmount = records.sumOf { it.leftAmountFen }
+    val hasMore = records.size < total && loadMoreError == null
+    val listState = rememberLazyListState()
+
+    // 接近底部（还剩 3 项可见）时自动取下一页，避免用户反复点按钮。
+    // hasMore 是普通局部值而非 State，必须作为 key，否则闭包会一直读到首次组合时的旧值。
+    val shouldLoadMore by remember(hasMore) {
+        derivedStateOf {
+            if (!hasMore) return@derivedStateOf false
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return@derivedStateOf false
+            lastVisible >= listState.layoutInfo.totalItemsCount - 3
+        }
+    }
+    LaunchedEffect(shouldLoadMore, isLoadingMore) {
+        if (shouldLoadMore && !isLoadingMore) onLoadMore()
+    }
+
     LazyColumn(
+        state = listState,
         modifier = Modifier
             .fillMaxSize()
             .overScrollVertical()
@@ -266,7 +317,6 @@ private fun CouponList(
     ) {
         item {
             CouponSummaryCard(
-                visibleCount = records.size,
                 total = total,
                 filter = filter,
                 leftAmountFen = leftAmount,
@@ -282,17 +332,35 @@ private fun CouponList(
                 onReceive = onReceive
             )
         }
-        if (records.size < total) {
+        // 触底自动加载，不再让用户一页一页点"加载更多"。
+        // 正常情况只显示一个轻量指示器；只有翻页失败时才需要用户介入重试。
+        if (hasMore) {
             item {
-                Button(
-                    onClick = onLoadMore,
-                    enabled = !isLoadingMore,
-                    modifier = Modifier.fillMaxWidth()
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    if (isLoadingMore) {
-                        CircularProgressIndicator(size = 18.dp, strokeWidth = 2.dp)
-                    } else {
-                        Text("加载更多")
+                    CircularProgressIndicator(size = 20.dp, strokeWidth = 2.dp)
+                }
+            }
+        } else if (loadMoreError != null) {
+            item {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        loadMoreError,
+                        style = MiuixTheme.textStyles.footnote1,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Button(onClick = onLoadMore, enabled = !isLoadingMore) {
+                        Text("重试")
                     }
                 }
             }
@@ -302,17 +370,16 @@ private fun CouponList(
 
 @Composable
 private fun CouponSummaryCard(
-    visibleCount: Int,
     total: Int,
     filter: CouponFilter,
     leftAmountFen: Long,
     statusMessage: String?
 ) {
-    val countLabel = when (filter) {
-        CouponFilter.AVAILABLE -> "可领取 $total 张"
-        CouponFilter.USABLE -> "可使用 $total 张"
-        CouponFilter.USED_UP -> "已用完 $total 张"
-        CouponFilter.EXPIRED -> "已过期 $total 张"
+    val stateLabel = when (filter) {
+        CouponFilter.AVAILABLE -> "可领取"
+        CouponFilter.USABLE -> "可使用"
+        CouponFilter.USED_UP -> "已用完"
+        CouponFilter.EXPIRED -> "已过期"
     }
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -340,10 +407,10 @@ private fun CouponSummaryCard(
             }
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
-                Text("当前列表", style = MiuixTheme.textStyles.body2, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                Text(stateLabel, style = MiuixTheme.textStyles.body2, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    "$visibleCount / $total 张",
+                    "$total 张",
                     style = MiuixTheme.textStyles.title3,
                     fontWeight = FontWeight.Bold
                 )
@@ -359,7 +426,7 @@ private fun CouponSummaryCard(
                 }
             }
             Column(horizontalAlignment = Alignment.End) {
-                Text(countLabel, style = MiuixTheme.textStyles.footnote1, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                Text("剩余面额", style = MiuixTheme.textStyles.footnote1, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
                 Text(
                     "¥%.2f".format(leftAmountFen / 100.0),
                     style = MiuixTheme.textStyles.subtitle,

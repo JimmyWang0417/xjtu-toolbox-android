@@ -26,10 +26,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Business
 import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContactPhone
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -64,7 +62,6 @@ import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.Surface
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.basic.rememberTopAppBarState
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -160,19 +157,10 @@ fun YellowPageScreen(onBack: () -> Unit) {
                     )
                 }
                 item {
-                    TextField(
-                        value = query,
-                        onValueChange = { query = it },
+                    com.xjtu.toolbox.ui.components.AppSearchBar(
+                        query = query,
+                        onQueryChange = { query = it },
                         label = "搜索机构或电话号码",
-                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                        trailingIcon = if (query.isNotEmpty()) {
-                            {
-                                IconButton(onClick = { query = "" }) {
-                                    Icon(Icons.Default.Close, contentDescription = "清空")
-                                }
-                            }
-                        } else null,
-                        singleLine = true,
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp)
