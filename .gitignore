@@ -18,6 +18,7 @@ local.properties
 # Signing
 release.jks
 release.jks.b64
+keystore.properties
 .kotlin/
 # Gradle
 .gradle/
@@ -37,8 +38,18 @@ output-metadata.json
 # Local config
 local.properties
 
-# KuiklyUI CMP migration project (separate git repo)
-XJTUTOOLBOX_CMP/
+# 跨平台迁移的两次历史尝试（XJTUTOOLBOX_CMP / XJTUTOOLBOX_CMPS）现已纳入版本控制，
+# 见各自目录下的 README。构建产物仍然排除：
+XJTUTOOLBOX_CMP/build/
+XJTUTOOLBOX_CMP/**/build/
+XJTUTOOLBOX_CMP/.gradle/
+XJTUTOOLBOX_CMP/local.properties
+XJTUTOOLBOX_CMP/build_errors.txt
+XJTUTOOLBOX_CMP/errors.txt
+XJTUTOOLBOX_CMPS/build/
+XJTUTOOLBOX_CMPS/**/build/
+XJTUTOOLBOX_CMPS/.gradle/
+XJTUTOOLBOX_CMPS/local.properties
 
 # miuix reference source (read-only, not part of this repo)
 miuix-ref/

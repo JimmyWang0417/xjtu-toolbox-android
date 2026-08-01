@@ -1,0 +1,14 @@
+*.iml
+.gradle/
+build/
+/local.properties
+/.idea/
+.DS_Store
+.kotlin/
+*.apk
+*.ap_
+*.aab
+*.dm
+output.json
+output-metadata.json
+/iosApp/Pods/
