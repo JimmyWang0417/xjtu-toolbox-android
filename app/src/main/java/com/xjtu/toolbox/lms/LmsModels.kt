@@ -286,9 +286,15 @@ data class LmsReplayVideo(
     val isBestAudio: Boolean = false,
     val playType: String = "",
     val downloadUrl: String = "",
+    /** 在线播放地址，与 downloadUrl 是两个不同用途的字段（上游协议：download_url 用于下载，play_url 用于在线播放）。 */
+    val playUrl: String = "",
     val fileKey: String = "",
     val size: Int = 0
 ) {
+    /** 播放时优先用 playUrl；缺失才回退 downloadUrl（容错，防止个别活动类型没给这个字段）。 */
+    val streamUrl: String
+        get() = playUrl.ifBlank { downloadUrl }
+
     /** 人类可读的标签 */
     val readableLabel: String
         get() = when {

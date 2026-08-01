@@ -60,9 +60,11 @@ fun DownloadManagerScreen(
     var lmsDownloads by remember { mutableStateOf<List<LmsDownloadRecord>>(emptyList()) }
     var stats by remember { mutableStateOf<DownloadManager.DownloadStats?>(null) }
 
-    // 多选清理模式
+    // 多选批量管理。两份选中集合，因为本页有两套彼此独立的数据源：
+    // 回放视频任务在 Room（按 id），文件类下载在 MediaStore（按 uri）。
     var isCleanupMode by remember { mutableStateOf(false) }
     val selectedTaskIds = remember { mutableStateListOf<Long>() }
+    val selectedFileUris = remember { mutableStateListOf<String>() }
     
     // 显示下载目录信息弹窗
     val showDirInfo = remember { mutableStateOf(false) }
@@ -91,10 +93,13 @@ fun DownloadManagerScreen(
         }
     }
 
-    // 退出清理模式时清空选择
+    // 退出批量模式时清空两类选择
     DisposableEffect(isCleanupMode) {
         onDispose {
-            if (!isCleanupMode) selectedTaskIds.clear()
+            if (!isCleanupMode) {
+                selectedTaskIds.clear()
+                selectedFileUris.clear()
+            }
         }
     }
 
@@ -102,7 +107,7 @@ fun DownloadManagerScreen(
         topBar = {
             if (isCleanupMode) {
                 SmallTopAppBar(
-                    title = "清理下载记录",
+                    title = "批量管理",
                     color = MiuixTheme.colorScheme.surfaceVariant,
                     navigationIcon = {
                         IconButton(onClick = { isCleanupMode = false }) {
@@ -110,13 +115,16 @@ fun DownloadManagerScreen(
                         }
                     },
                     actions = {
+                        // 全选覆盖两类数据源：回放任务（Room）+ 文件类下载（MediaStore）
                         IconButton(onClick = {
-                            val allIds = allTasks.map { it.id }.toSet()
-                            if (selectedTaskIds.size == allTasks.size && allTasks.isNotEmpty()) {
-                                selectedTaskIds.clear()  // 已全选 → 取消全选
-                            } else {
-                                selectedTaskIds.clear()
-                                selectedTaskIds.addAll(allTasks.map { it.id })  // 未全选 → 全选
+                            val allSelected = selectedTaskIds.size == allTasks.size &&
+                                selectedFileUris.size == lmsDownloads.size &&
+                                (allTasks.isNotEmpty() || lmsDownloads.isNotEmpty())
+                            selectedTaskIds.clear()
+                            selectedFileUris.clear()
+                            if (!allSelected) {
+                                selectedTaskIds.addAll(allTasks.map { it.id })
+                                selectedFileUris.addAll(lmsDownloads.map { it.uri })
                             }
                         }) {
                             Icon(Icons.Default.SelectAll, contentDescription = "全选/取消")
@@ -125,7 +133,7 @@ fun DownloadManagerScreen(
                 )
             } else {
                 SmallTopAppBar(
-                    title = "下载记录",
+                    title = "下载管理",
                     color = MiuixTheme.colorScheme.surfaceVariant,
                     navigationIcon = {
                         IconButton(onClick = onBack) {
@@ -137,10 +145,11 @@ fun DownloadManagerScreen(
                         IconButton(onClick = { showDirInfo.value = true }) {
                             Icon(Icons.Default.Info, contentDescription = "下载目录信息")
                         }
-                        // 清理按钮
-                        if (allTasks.any { it.status == "completed" || it.status == "failed" || it.status == "cancelled" }) {
+                        // 有任何可管理的条目就显示入口。条件不能只看回放任务，
+                        // 否则只下载过文件的用户进不去批量模式。
+                        if (allTasks.isNotEmpty() || lmsDownloads.isNotEmpty()) {
                             IconButton(onClick = { isCleanupMode = true }) {
-                                Icon(Icons.Default.DeleteSweep, contentDescription = "清理")
+                                Icon(Icons.Default.DeleteSweep, contentDescription = "批量管理")
                             }
                         }
                     }
@@ -148,7 +157,8 @@ fun DownloadManagerScreen(
             }
         },
         bottomBar = {
-            if (isCleanupMode && selectedTaskIds.isNotEmpty()) {
+            val selectedTotal = selectedTaskIds.size + selectedFileUris.size
+            if (isCleanupMode && selectedTotal > 0) {
                 var deleteFiles by remember { mutableStateOf(true) }
                 Surface(
                     modifier = Modifier
@@ -163,38 +173,52 @@ fun DownloadManagerScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // 左边：已选数量
+                        // 左边：已选数量（两类合计）
                         Text(
-                            "已选 ${selectedTaskIds.size} 条",
+                            "已选 $selectedTotal 项",
                             style = MiuixTheme.textStyles.body2,
                             fontWeight = FontWeight.Medium,
                             modifier = Modifier
                         )
-                        // 中间：同时删除文件（整个区域可点击切换）
-                        Row(
-                            modifier = Modifier.clickable { deleteFiles = !deleteFiles },
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Checkbox(
-                                state = if (deleteFiles) androidx.compose.ui.state.ToggleableState.On else androidx.compose.ui.state.ToggleableState.Off,
-                                onClick = { deleteFiles = !deleteFiles },
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text(
-                                "同时删除文件",
-                                style = MiuixTheme.textStyles.body2,
-                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary
-                            )
+                        // 中间：同时删除文件（整个区域可点击切换）。
+                        // 只对回放任务有意义——文件类下载本身就是文件，删记录必然连文件一起删。
+                        if (selectedTaskIds.isNotEmpty()) {
+                            Row(
+                                modifier = Modifier.clickable { deleteFiles = !deleteFiles },
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    state = if (deleteFiles) androidx.compose.ui.state.ToggleableState.On else androidx.compose.ui.state.ToggleableState.Off,
+                                    onClick = { deleteFiles = !deleteFiles },
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text(
+                                    "同时删除文件",
+                                    style = MiuixTheme.textStyles.body2,
+                                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary
+                                )
+                            }
                         }
                         // 右边：删除选中按钮
                         Button(
                             onClick = {
                                 scope.launch {
+                                    // 回放任务：Room + 本地文件
                                     selectedTaskIds.toList().forEach { id ->
                                         downloadManager.deleteTask(id, deleteFile = deleteFiles)
                                     }
+                                    // 文件类下载：MediaStore + 记录
+                                    withContext(Dispatchers.IO) {
+                                        selectedFileUris.toList().forEach { uri ->
+                                            runCatching {
+                                                context.contentResolver.delete(android.net.Uri.parse(uri), null, null)
+                                            }
+                                            LmsDownloadStore.remove(context, uri)
+                                        }
+                                    }
                                     selectedTaskIds.clear()
+                                    selectedFileUris.clear()
                                     loadTasks()
                                 }
                             }
@@ -221,7 +245,7 @@ fun DownloadManagerScreen(
                     )
                     Spacer(Modifier.height(12.dp))
                     Text(
-                        "暂无下载记录",
+                        "暂无下载内容",
                         fontSize = 15.sp,
                         color = MiuixTheme.colorScheme.onSurfaceVariantSummary
                     )
@@ -237,11 +261,14 @@ fun DownloadManagerScreen(
                     Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(bottom = 16.dp)
                 ) {
-                    if (lmsDownloads.isNotEmpty() && !isCleanupMode) {
+                    // 文件类下载（成绩单 / 思源课件 / 资料站 / 其他）。
+                    // 批量管理模式下也要显示，否则这些文件无法批量删除。
+                    if (lmsDownloads.isNotEmpty()) {
                         val groupedDownloads = lmsDownloads.groupBy { it.category }
                         val orderedGroups = listOf(
                             LmsDownloadStore.CATEGORY_TRANSCRIPT to "电子成绩单",
                             LmsDownloadStore.CATEGORY_LMS to "思源文件",
+                            LmsDownloadStore.CATEGORY_ZYXF to "仲英学辅资料",
                             LmsDownloadStore.CATEGORY_OTHER to "其他文件"
                         )
                         orderedGroups.forEach { (category, title) ->
@@ -253,10 +280,23 @@ fun DownloadManagerScreen(
                                 items(records, key = { "${category}_${it.uri}" }) { record ->
                                     LmsDownloadCard(
                                         record = record,
+                                        isCleanupMode = isCleanupMode,
+                                        isSelected = record.uri in selectedFileUris,
+                                        onToggleSelect = {
+                                            if (record.uri in selectedFileUris) {
+                                                selectedFileUris.remove(record.uri)
+                                            } else {
+                                                selectedFileUris.add(record.uri)
+                                            }
+                                        },
                                         onOpen = {
                                             runCatching {
+                                                // 类型交给系统：用记录里的 mimeType，空则 */* 弹选择器
                                                 val intent = Intent(Intent.ACTION_VIEW).apply {
-                                                    setDataAndType(android.net.Uri.parse(record.uri), record.mimeType)
+                                                    setDataAndType(
+                                                        android.net.Uri.parse(record.uri),
+                                                        record.mimeType.ifBlank { "*/*" }
+                                                    )
                                                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                                 }
                                                 context.startActivity(Intent.createChooser(intent, "打开文件"))
@@ -322,14 +362,19 @@ fun DownloadManagerScreen(
                             },
                             onPlay = {
                                 try {
-                                    val file = File(task.filePath)
-                                    if (file.exists()) {
-                                        // 使用 file:// URI 直接播放（Android 10 及以下）
-                                        // Android 11+ 需要 MANAGE_EXTERNAL_STORAGE 权限或使用 FileProvider
-                                        // 这里尝试直接使用 file URI，失败则提示用户
-                                        val uri = android.net.Uri.fromFile(file)
-                                        val intent = Intent(Intent.ACTION_VIEW).apply {
-                                            setDataAndType(uri, "video/*")
+                                     val file = File(task.filePath)
+                                     if (file.exists()) {
+                                         // 类型按实际扩展名交给系统判定，查不到给 */* 弹选择器。
+                                         // 不写死具体类型，避免遇到未覆盖的格式时无应用可选。
+                                         val mime = android.webkit.MimeTypeMap.getSingleton()
+                                             .getMimeTypeFromExtension(file.extension.lowercase())
+                                             ?: "*/*"
+                                         // 使用 file:// URI 直接播放（Android 10 及以下）
+                                         // Android 11+ 需要 MANAGE_EXTERNAL_STORAGE 权限或使用 FileProvider
+                                         // 这里尝试直接使用 file URI，失败则提示用户
+                                         val uri = android.net.Uri.fromFile(file)
+                                         val intent = Intent(Intent.ACTION_VIEW).apply {
+                                             setDataAndType(uri, mime)
                                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                                             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                         }
@@ -343,12 +388,12 @@ fun DownloadManagerScreen(
                                                     "${context.packageName}.fileprovider",
                                                     file
                                                 )
-                                                val contentIntent = Intent(Intent.ACTION_VIEW).apply {
-                                                    setDataAndType(contentUri, "video/*")
-                                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                                }
-                                                context.startActivity(Intent.createChooser(contentIntent, "选择播放器"))
+                                                 val contentIntent = Intent(Intent.ACTION_VIEW).apply {
+                                                     setDataAndType(contentUri, mime)
+                                                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                 }
+                                                 context.startActivity(Intent.createChooser(contentIntent, "打开文件"))
                                             } catch (e2: Exception) {
                                                 android.widget.Toast.makeText(
                                                     context,
@@ -377,11 +422,14 @@ fun DownloadManagerScreen(
                     }
                 }
             }
+
+        // 必须在 Scaffold 的 content 内：OverlayBottomSheet 靠 Scaffold 提供的
+        // LocalDialogStates 宿主渲染，写在 Scaffold 外面会静默不显示。
+    // 下载目录信息弹窗
+    DownloadDirInfoDialog(show = showDirInfo)
         }
     }
     
-    // 下载目录信息弹窗
-    DownloadDirInfoDialog(show = showDirInfo)
 }
 
 @Composable
@@ -414,16 +462,32 @@ private fun DownloadSectionHeader(title: String, count: Int) {
 private fun LmsDownloadCard(
     record: LmsDownloadRecord,
     onOpen: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    isCleanupMode: Boolean = false,
+    isSelected: Boolean = false,
+    onToggleSelect: () -> Unit = {},
 ) {
     Card(
-        onClick = onOpen,
+        // 批量管理模式下点击=选中，而不是打开文件
+        onClick = if (isCleanupMode) onToggleSelect else onOpen,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
     ) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            if (isCleanupMode) {
+                Checkbox(
+                    state = if (isSelected) {
+                        androidx.compose.ui.state.ToggleableState.On
+                    } else {
+                        androidx.compose.ui.state.ToggleableState.Off
+                    },
+                    onClick = { onToggleSelect() },
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+            }
             Surface(
                 shape = RoundedCornerShape(12.dp),
                 color = MiuixTheme.colorScheme.secondaryContainer,
@@ -647,7 +711,8 @@ private fun DownloadTaskCard(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
                     )
-                    // 视频源标签
+                    // 视频源标签。这张表只存课程回放视频；文件类下载走 LmsDownloadStore，
+                    // 在本页的独立分区显示。
                     Surface(
                         shape = RoundedCornerShape(4.dp),
                         color = MiuixTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
@@ -811,12 +876,13 @@ private fun DownloadDirInfoDialog(show: MutableState<Boolean>) {
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
-                "视频文件保存位置",
+                "保存位置",
                 style = MiuixTheme.textStyles.body1,
                 fontWeight = FontWeight.Bold
             )
             Text(
-                "${LmsDownloadStore.publicDisplayPath()}\nDownloads/ClassReplay/",
+                "文件：${LmsDownloadStore.publicDisplayPath()}\n" +
+                    "回放视频：${DownloadManager.getInstance(LocalContext.current).videoDirPath}",
                 style = MiuixTheme.textStyles.body2,
                 color = MiuixTheme.colorScheme.primary,
                 fontWeight = FontWeight.Medium
@@ -828,12 +894,12 @@ private fun DownloadDirInfoDialog(show: MutableState<Boolean>) {
                 fontWeight = FontWeight.Bold
             )
             Text(
-                "• 成绩单、思源课件和作业附件统一保存到 ${LmsDownloadStore.publicDisplayPath()}",
+                "• 成绩单、思源课件、资料站文件统一保存到公共下载目录，系统文件管理器可见，卸载 App 不会丢",
                 style = MiuixTheme.textStyles.body2,
                 color = MiuixTheme.colorScheme.onSurfaceVariantSummary
             )
             Text(
-                "• 课堂回放仍保存在 Downloads/ClassReplay/，支持外部播放器播放",
+                "• 课堂回放视频保存在应用专属目录（无需存储权限），支持外部播放器播放；卸载 App 会一并清除",
                 style = MiuixTheme.textStyles.body2,
                 color = MiuixTheme.colorScheme.onSurfaceVariantSummary
             )

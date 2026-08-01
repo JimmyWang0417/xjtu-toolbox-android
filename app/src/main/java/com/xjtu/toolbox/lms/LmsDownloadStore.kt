@@ -21,6 +21,9 @@ object LmsDownloadStore {
     const val CATEGORY_LMS = "lms"
     const val CATEGORY_TRANSCRIPT = "transcript"
     const val CATEGORY_OTHER = "other"
+
+    /** 仲英学辅资料站下载的文件。与思源课件分开，它们来源和用途都不一样。 */
+    const val CATEGORY_ZYXF = "zyxf"
     const val PUBLIC_DIR_NAME = "XJTUToolBox"
     const val RELATIVE_PATH = "Download/$PUBLIC_DIR_NAME"
     const val RELATIVE_PATH_WITH_SLASH = "$RELATIVE_PATH/"
@@ -64,6 +67,55 @@ object LmsDownloadStore {
 
     fun remove(context: Context, uri: String) {
         save(context, getAll(context).filterNot { it.uri == uri })
+    }
+
+    /**
+     * 把一段**已在内存里**的字节写入公共 Downloads 并登记。
+     *
+     * 用于资料站那类 `blob:` 下载：blob 只存在于 WebView 的 JS 上下文，App 侧取不到 URL，
+     * 只能由页面把内容读成 base64 送回来，再由这里落盘。
+     *
+     * 走 MediaStore 而不是应用私有目录：不需要存储权限、系统文件管理器可见、卸载不丢，
+     * 与成绩单/思源课件同一个目录，用户找文件时不用记「哪类在哪」。
+     *
+     * @return 成功时返回 MediaStore uri 字符串，失败返回 null
+     */
+    fun saveBytes(
+        context: Context,
+        fileName: String,
+        mimeType: String,
+        bytes: ByteArray,
+        category: String = CATEGORY_OTHER,
+    ): String? {
+        val mime = mimeType.ifBlank { "application/octet-stream" }
+        val cv = android.content.ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+            put(MediaStore.Downloads.MIME_TYPE, mime)
+            put(MediaStore.Downloads.RELATIVE_PATH, RELATIVE_PATH)
+            put(MediaStore.Downloads.IS_PENDING, 1)
+        }
+        val resolver = context.contentResolver
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv) ?: return null
+        return try {
+            resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: return null
+            cv.clear()
+            cv.put(MediaStore.Downloads.IS_PENDING, 0)
+            resolver.update(uri, cv, null, null)
+            add(
+                context,
+                LmsDownloadRecord(
+                    name = fileName,
+                    mimeType = mime,
+                    uri = uri.toString(),
+                    savedAt = System.currentTimeMillis(),
+                    category = category,
+                )
+            )
+            uri.toString()
+        } catch (e: Exception) {
+            resolver.delete(uri, null, null)
+            null
+        }
     }
 
     private fun save(context: Context, records: List<LmsDownloadRecord>) {

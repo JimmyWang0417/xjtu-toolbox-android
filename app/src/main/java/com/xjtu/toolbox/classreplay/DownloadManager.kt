@@ -43,11 +43,20 @@ class DownloadManager private constructor(private val context: Context) {
         }
     }
 
-    // 下载目录 - 公共 Downloads/ClassReplay 目录（Android 12 无需权限）
+    // 下载目录：应用专属外部目录，不需要存储权限。
+    //
+    // 不能用 Environment.getExternalStoragePublicDirectory(DIRECTORY_DOWNLOADS)：
+    // 分区存储（Android 10+）下 App 无权往公共 Downloads 写，而清单里只有 INTERNET
+    // 权限，mkdirs() 会静默失败、写文件抛异常。
+    // 需要落到公共目录的走 MediaStore（见 LmsDownloadStore）。
     private val downloadDir: File by lazy {
-        val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        File(downloadsDir, "ClassReplay").also { it.mkdirs() }
+        val base = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            ?: File(context.filesDir, "Download")
+        File(base, "ClassReplay").also { it.mkdirs() }
     }
+
+    /** 视频保存目录，供界面展示用。别在 UI 里另写一份字符串，改了目录就会不一致。 */
+    val videoDirPath: String get() = downloadDir.absolutePath
 
     // OkHttp 客户端 (不设置超时以支持大文件下载)
     private val httpClient: OkHttpClient by lazy {
@@ -177,6 +186,8 @@ class DownloadManager private constructor(private val context: Context) {
                 .url(task.videoUrl)
                 .header("Accept", "*/*")
                 .header("User-Agent", "XJTUToolbox/1.0")
+
+
 
             if (existingBytes > 0) {
                 requestBuilder.header("Range", "bytes=$existingBytes-")

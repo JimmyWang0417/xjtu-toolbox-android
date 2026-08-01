@@ -119,8 +119,18 @@ class LmsApi(private val site: SiteSession) {
      */
     fun getCourseActivities(courseId: Int): List<LmsActivity> {
         val data = getJson("$baseUrl/api/courses/$courseId/activities")
-            ?: return emptyList()
-        val activities = data.getAsJsonArray("activities") ?: return emptyList()
+        if (data == null) {
+            Log.w(TAG, "getCourseActivities($courseId): 响应为空或非 JSON 对象")
+            return emptyList()
+        }
+        val activities = data.getAsJsonArray("activities")
+        if (activities == null) {
+            // 首页统计发现某些课程恒返回 0 条活动，这里把顶层键打出来，
+            // 便于确认是响应结构变了（不再是 {activities:[...]}）还是课程本身没内容。
+            Log.w(TAG, "getCourseActivities($courseId): 无 activities 键，顶层键=${data.keySet()}")
+            return emptyList()
+        }
+        Log.d(TAG, "getCourseActivities($courseId): ${activities.size()} 条")
         return activities.mapNotNull { elem ->
             try {
                 val obj = elem.asJsonObject
@@ -340,16 +350,18 @@ class LmsApi(private val site: SiteSession) {
 
         val headers = mutableMapOf<String, String>()
         if (lessonActivityId != null) {
-            try {
-                val rmsToken = getLessonRmsToken(lessonActivityId)
-                headers["Authorization"] = "Bearer $rmsToken"
-            } catch (e: Exception) {
-                Log.w(TAG, "getReplayVideos: failed to get RMS token", e)
-            }
+            // 拿不到 token 就别继续了：captures 接口没有 Authorization 会返回鉴权错误，
+            // 之前只 warn 然后照发无 token 请求，于是错误被当成"没有回放"，表现为播放失败。
+            val rmsToken = getLessonRmsToken(lessonActivityId)
+            headers["Authorization"] = "Bearer $rmsToken"
         }
 
-        val data = getJson("$rmsBaseUrl/api/embed/lesson-activities/captures/$replayCode", headers)
-            ?: return emptyList()
+        // lesson_activity_id 必须作为 query 参数带上，上游同样传了这个参数
+        val url = buildString {
+            append("$rmsBaseUrl/api/embed/lesson-activities/captures/$replayCode")
+            if (lessonActivityId != null) append("?lesson_activity_id=$lessonActivityId")
+        }
+        val data = getJson(url, headers) ?: return emptyList()
 
         // 检查错误
         data.get("error").safeObject()?.let { error ->
@@ -378,6 +390,7 @@ class LmsApi(private val site: SiteSession) {
                     isBestAudio = obj.get("is_best_audio").safeBoolean(),
                     playType = obj.get("play_type").safeString() ?: "",
                     downloadUrl = obj.get("download_url").safeString() ?: "",
+                    playUrl = obj.get("play_url").safeString() ?: "",
                     fileKey = obj.get("file_key").safeString() ?: "",
                     size = obj.get("size").safeInt()
                 )
@@ -589,6 +602,7 @@ class LmsApi(private val site: SiteSession) {
                             playType = v.get("play_type").safeString() ?: "",
                             downloadUrl = v.get("download_url").safeString()
                                 ?: v.get("url").safeString() ?: "",
+                            playUrl = v.get("play_url").safeString() ?: "",
                             fileKey = v.get("file_key").safeString() ?: "",
                             size = v.get("size").safeInt()
                         )

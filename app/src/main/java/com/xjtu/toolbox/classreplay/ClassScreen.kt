@@ -45,6 +45,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.*
 import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
+import top.yukonga.miuix.kmp.window.WindowBottomSheet
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
@@ -73,7 +74,11 @@ fun ClassScreen(
     val showHint = remember { mutableStateOf(!prefs.getBoolean("class_replay_hint_shown", false)) }
     if (showHint.value) {
         BackHandler { showHint.value = false; prefs.edit().putBoolean("class_replay_hint_shown", true).apply() }
-        OverlayBottomSheet(
+        // 用 Window* 而非 Overlay*：本函数是路由外壳，Scaffold 在各子页面里
+        // （CourseListPage / ReplayListPage），而 Overlay* 需要 Scaffold 提供的
+        // LocalDialogStates 宿主才会渲染，写在外壳里拿不到宿主会静默不显示。
+        // 当前显示哪个子页面是动态的，搬进任一个都不对，故用自带独立 Window 的变体。
+        WindowBottomSheet(
             show = showHint.value,
             title = "功能说明",
             onDismissRequest = {
