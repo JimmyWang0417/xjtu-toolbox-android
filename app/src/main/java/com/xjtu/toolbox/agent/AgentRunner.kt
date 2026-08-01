@@ -37,7 +37,30 @@ class AgentRunner(private val tools: AgentToolRegistry) {
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(120, TimeUnit.SECONDS)   // 流式期间连接需保持更久
             .build()
+
+        /** 同一站点两次工具调用的最小间隔。不同站点互不影响。 */
+        private const val SAME_SITE_MIN_INTERVAL_MS = 800L
+
+        /**
+         * 单条工具结果的字符上限。
+         *
+         * 这是上下文爆掉的真正来源：`AgentViewModel.truncateHistory()` 按**条数**裁剪，
+         * 而一条 get_notifications 可能几千字——条数远没超，token 早就爆了。
+         * 与其引入分词器精确算 token（要按模型分，代价和收益不匹配），
+         * 不如直接堵住单条巨物，这一条就能覆盖绝大多数情况。
+         */
+        private const val MAX_TOOL_RESULT_CHARS = 4000
+
+        internal fun capToolResult(result: String): String {
+            if (result.length <= MAX_TOOL_RESULT_CHARS) return result
+            return result.take(MAX_TOOL_RESULT_CHARS) +
+                "\n…（结果过长已截断，共 ${result.length} 字。需要更多请缩小查询范围，" +
+                "例如指定日期、学期或关键词后重新调用。）"
+        }
     }
+
+    /** 站点 -> 上次调用时刻，用于按站点限流。 */
+    private val lastCallAt = mutableMapOf<String, Long>()
 
     /** 流式累积一个 tool_call（OpenAI 把 id/name/arguments 分片下发，按 index 聚合）。 */
     private class ToolCallAcc(var id: String = "", var name: String = "") {
@@ -140,7 +163,19 @@ class AgentRunner(private val tools: AgentToolRegistry) {
             val toolResults = ArrayList<JsonObject>(sr.toolCalls.size)
             for (tc in sr.toolCalls) {
                 onToolCall(tc.name)
-                if (toolCallCount > 0) delay(1000L)
+                // 限流按**站点**算，不再全局一刀切。
+                // 原来是 `if (toolCallCount > 0) delay(1000L)`：不管这次打的是哪个系统都先等 1 秒。
+                // 而连环问（"几点下课 / 哪有空教室 / 图书馆还有座"）恰恰打的是不同系统，
+                // 互相之间没有任何限频理由，白白多等好几秒。登录侧的防刷已由 CasGate 全局串行 +
+                // 失败退避覆盖，这里只需防"同一站点被连续猛打"。
+                tools.rateLimitKeyOf(tc.name)?.let { site ->
+                    val last = lastCallAt[site]
+                    val now = System.currentTimeMillis()
+                    if (last != null && now - last < SAME_SITE_MIN_INTERVAL_MS) {
+                        delay(SAME_SITE_MIN_INTERVAL_MS - (now - last))
+                    }
+                    lastCallAt[site] = System.currentTimeMillis()
+                }
                 val result = runCatching { tools.execute(tc.name, tc.arguments) }
                     .getOrElse { e ->
                         if (e is com.xjtu.toolbox.auth.AuthExpiredException) throw e
@@ -150,7 +185,7 @@ class AgentRunner(private val tools: AgentToolRegistry) {
                 toolResults.add(JsonObject().apply {
                     addProperty("role", "tool")
                     addProperty("tool_call_id", tc.id)
-                    addProperty("content", result)
+                    addProperty("content", capToolResult(result))
                 })
             }
             messages.add(assistantMsg)

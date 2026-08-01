@@ -10,7 +10,9 @@ data class AgentConfig(
     val apiKey: String = "",
     val model: String = "",
     val baseUrl: String = "",
-    val maxToolCalls: Int = 4,
+    // 8 而非 4：全部工具都是只读查询，没有副作用风险，而"搜一次 + 读两个链接"
+    // 或"课表 + 空教室 + 图书馆"这类再正常不过的连环问，4 次直接打满。
+    val maxToolCalls: Int = 8,
     val assistantName: String = DEFAULT_ASSISTANT_NAME,
     val disabledCaps: Set<String> = emptySet(),
     val searchEngine: String = SEARCH_BING,
@@ -111,7 +113,7 @@ class AgentConfigStore(context: Context) {
         apiKey = securePrefs.getString("api_key", "") ?: "",
         model = prefs.getString("model", "") ?: "",
         baseUrl = prefs.getString("base_url", "") ?: "",
-        maxToolCalls = prefs.getInt("max_tool_calls", 4),
+        maxToolCalls = prefs.getInt("max_tool_calls", 8),
         assistantName = sanitizeAgentTitle(
             prefs.getString("assistant_name", AgentConfig.DEFAULT_ASSISTANT_NAME)
                 ?: AgentConfig.DEFAULT_ASSISTANT_NAME

@@ -52,6 +52,13 @@ class AgentToolRegistry(
 ) {
     private val gson = Gson()
 
+    /**
+     * 限流分组键。复用 [toolCaps] 的能力分类——它天然就是按后端系统分的组，
+     * 正好可以当"同一站点"的判据。返回 null 表示纯本地工具（取时间、设闹钟等），
+     * 不需要任何间隔。
+     */
+    fun rateLimitKeyOf(toolName: String): String? = toolCaps[toolName]
+
     private val toolCaps = mapOf(
         "get_schedule" to "schedule",
         "get_exam_schedule" to "schedule",
@@ -107,7 +114,7 @@ class AgentToolRegistry(
      * 姓名/学院优先读缓存（昵称、校园卡），缺失则在线拉一网通办个人信息并缓存。
      */
     suspend fun userContext(): String = withContext(Dispatchers.IO) {
-        dataCache.get("agent_user_context", Long.MAX_VALUE)?.let { return@withContext it }
+        dataCache.get("agent_user_context_v2", Long.MAX_VALUE)?.let { return@withContext it }
 
         val sid = loginState.activeUsername
         var name = runCatching { com.xjtu.toolbox.util.CredentialStore(context).loadNickname() }
@@ -141,6 +148,24 @@ class AgentToolRegistry(
         }
         college?.let { lines.add("- 学院：$it") }
 
+        // 学籍档案（hello.xjtu.edu.cn，本地缓存，不联网）。
+        // **刻意不做成工具**：这些字段静态、在"我的"页面就摆着，让模型专门调一次工具去查
+        // 纯属绕远。它们的价值在于当**上下文**——比如推荐空教室时默认按校区过滤，
+        // 而不是把创新港的教室报给兴庆的用户。
+        runCatching { com.xjtu.toolbox.hello.HelloProfileStore.cached(context) }.getOrNull()
+            ?.takeIf { it.hasContent() }
+            ?.let { p ->
+                if (college.isNullOrBlank()) p.departmentName.takeIf { it.isNotBlank() }
+                    ?.let { lines.add("- 学院：$it") }
+                p.academyName.takeIf { it.isNotBlank() }?.let { lines.add("- 书院：$it") }
+                p.professionName.takeIf { it.isNotBlank() }?.let { lines.add("- 专业：$it") }
+                p.className.takeIf { it.isNotBlank() }?.let { lines.add("- 班级：$it") }
+                p.campusName.takeIf { it.isNotBlank() }?.let {
+                    lines.add("- 校区：$it（涉及教室、场馆、食堂等地点时默认按本校区回答）")
+                }
+                if (p.grade > 0) lines.add("- 年级：${p.grade} 级")
+            }
+
         if (lines.isEmpty()) return@withContext ""
         // 山东彩蛋
         val isShandong = sid.length >= 5 && sid.substring(3, 5) == "37"
@@ -148,7 +173,7 @@ class AgentToolRegistry(
 
         val result = lines.joinToString("\n")
         // 只在姓名+学院都拿到时缓存（避免把"半成品"长期固化）
-        if (name != null && college != null) dataCache.put("agent_user_context", result)
+        if (name != null && college != null) dataCache.put("agent_user_context_v2", result)
         result
     }
 
@@ -271,7 +296,7 @@ class AgentToolRegistry(
             params(
                 "query" to strProp("搜索关键词。"),
                 "engine" to strProp("搜索引擎：bing / sogou / wechat。不填使用用户设置。"),
-                "limit" to intProp("返回条数，默认5，最多8。")
+                "limit" to intProp("返回条数，默认5，最多22。超过约10条会自动翻页，耗时更长；先用默认值，不够再加大。")
             )))
         arr.add(tool("web_fetch",
             "抓取并阅读一个网页的正文文本，常配合 web_search 或 get_notifications 返回的链接使用。返回标题、最终 URL、页面内链接和正文摘要，便于继续链式抓取。",
@@ -1091,6 +1116,20 @@ class AgentToolRegistry(
     private val webUa =
         "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
+    /**
+     * 搜索引擎必须用**桌面 UA**，与下面两个解析器所针对的 HTML 版本保持一致。
+     *
+     * 2026-08-01 实测（同一查询词，仅换 UA）：
+     * - Bing：手机 UA 只返回 871 字节的存根页，`li.b_algo` 一个都没有；桌面 UA 返回 102KB，正常。
+     * - 搜狗：手机 UA 会 **302 到 m.sogou.com** 移动版，`.vrwrap` 在移动版里根本不存在；
+     *   桌面 UA 不跳转，`.vrwrap` 15 个。
+     *
+     * 两边都没有验证码/风控页——所以这不是被反爬，是我们自己发的 UA 和解析器要的版面对不上。
+     * `webUa` 保持手机版给 web_fetch 用（正文页移动版更轻），搜索单独用这个。
+     */
+    private val searchUa =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
     private fun normalizeSearchLink(href: String, baseUrl: String): String {
         val raw = href.trim()
         if (raw.isBlank() || raw.startsWith("javascript:", ignoreCase = true)) return ""
@@ -1100,7 +1139,25 @@ class AgentToolRegistry(
                 raw.startsWith("http://", true) || raw.startsWith("https://", true) -> raw
                 else -> java.net.URL(java.net.URL(baseUrl), raw).toString()
             }
-        }.getOrDefault(raw)
+        }.getOrDefault(raw).let(::preferHttps)
+    }
+
+    /**
+     * 把校外链接的 `http://` 升级为 `https://`。
+     *
+     * `res/xml/network_security_config.xml` 只对 `xjtu.edu.cn`、场馆服务器 IP 和 Srun 网关
+     * 放行明文；其余域名走 Android 9+ 的默认策略——**明文请求直接被系统拒绝**
+     * （`CLEARTEXT communication to xxx not permitted`）。搜索结果里 `http://` 链接很常见
+     * （如 `http://mp.weixin.qq.com/s?...`），不升级的话模型一点进去就必然失败。
+     *
+     * 校内域名保持原样：那些系统不少只有 HTTP，强行升级反而全废。
+     */
+    private fun preferHttps(url: String): String {
+        if (!url.startsWith("http://", ignoreCase = true)) return url
+        val host = runCatching { java.net.URI(url).host }.getOrNull()?.lowercase().orEmpty()
+        val cleartextAllowed = host.endsWith("xjtu.edu.cn") ||
+            host == "202.117.17.144" || host == "10.6.18.2"
+        return if (cleartextAllowed) url else "https://" + url.substring("http://".length)
     }
 
     private fun parseBingResults(body: String, limit: Int, baseUrl: String): List<Triple<String, String, String>> {
@@ -1114,23 +1171,70 @@ class AgentToolRegistry(
                 Triple(title, link, snippet)
             }
             .filter { (_, link, _) -> link.startsWith("http") && !link.contains("bing.com/ck/a", ignoreCase = true) }
-            .take(limit.coerceIn(1, 8))
+            .take(limit.coerceIn(1, MAX_SEARCH_RESULTS))
             .toList()
     }
 
+    /**
+     * 搜狗网页搜索与微信搜索共用。
+     *
+     * 微信搜索的结果是 `ul.news-list > li[id^=sogou_vr_]`，每个 li 一条；
+     * 原来的选择器写的是 `.news-box`——那是**外层容器**，全页只有一个，
+     * 于是无论搜到多少条都只能出 1 条。必须选到 li 这一层。
+     */
     private fun parseSogouResults(body: String, limit: Int, baseUrl: String): List<Triple<String, String, String>> {
         val doc = org.jsoup.Jsoup.parse(body, baseUrl)
-        return doc.select(".results .vrwrap, .results .rb, .vrwrap, .rb, .news-box, .wx-rb").asSequence()
+        return doc.select(
+            ".results .vrwrap, .results .rb, .vrwrap, .rb, .wx-rb, " +
+                "ul.news-list > li, li[id^=sogou_vr_]"
+        ).asSequence()
             .mapNotNull { el ->
-                val a = el.selectFirst("h3 a, .vrTitle a, .txt-box h3 a, a[target=_blank]") ?: return@mapNotNull null
+                // 必须**逐个**选择器按优先级试，不能写成逗号列表：
+                // Jsoup 的 selectFirst("a, b") 返回的是**文档顺序**里第一个命中的元素，
+                // 与选择器的书写顺序无关。而微信结果 li 的结构是
+                // `.img-box > a`（缩略图，在前）→ `.txt-box > h3 > a`（标题，在后），
+                // 用逗号列表必然选中缩略图那个 a —— 标题空、链接指向图片。
+                val a = TITLE_SELECTORS.firstNotNullOfOrNull { el.selectFirst(it) }
+                    ?: return@mapNotNull null
                 val title = a.text().ifBlank { return@mapNotNull null }
                 val link = normalizeSearchLink(a.attr("href"), baseUrl)
-                val snippet = el.selectFirst(".str_info, .ft, .text-layout, .txt-info, .s-p")?.text().orEmpty()
+                val snippet = el.selectFirst(".txt-info, .str_info, .ft, .text-layout, .s-p")?.text().orEmpty()
                 Triple(title, link, snippet)
             }
-            .filter { (_, link, _) -> link.startsWith("http") }
-            .take(limit.coerceIn(1, 8))
+            .filter { (_, link, snippet) -> isUsefulSogouResult(link, snippet) }
+            .distinctBy { (_, link, _) -> link }
+            .take(limit.coerceIn(1, MAX_SEARCH_RESULTS))
             .toList()
+    }
+
+    /** 标题链接候选，按优先级排列，逐个尝试（原因见调用处注释）。 */
+    private val TITLE_SELECTORS = listOf(".txt-box h3 a", "h3 a", ".vrTitle a", "a[target=_blank]")
+
+    private companion object {
+        /** 搜索结果条数上限。一页约 10 条，22 条需翻到第 3 页。 */
+        const val MAX_SEARCH_RESULTS = 22
+        /** 最多翻几页。3 页 × 10 条足以覆盖上限，再多纯属浪费时间。 */
+        const val MAX_SEARCH_PAGES = 3
+    }
+
+    /**
+     * 剔除搜狗结果页里的非自然结果。实测一次「西安交通大学」，16 个命中元素里只有 7 条是真结果，
+     * 其余是广告、搜狗自家垂直卡片和站内相关搜索——不过滤的话模型拿到的就是一堆噪声。
+     *
+     * 判据：
+     * - `www.sogou.com/link?url=…` 是自然结果的跳转链接，一律保留（web_fetch 会自动跟随重定向）；
+     * - 其余 sogou.com 域名都是站内货（pic.sogou 图片、m.sogou 视频、www.sogou.com/sogou 相关搜索），丢弃；
+     * - 带 `fromcoop=` / `channel=sgtp` 的是推广位，丢弃；
+     * - 剩下的外链要求**必须有摘要**——腾讯地图之类的垂直卡片没有摘要，自然结果都有。
+     */
+    private fun isUsefulSogouResult(link: String, snippet: String): Boolean {
+        if (!link.startsWith("http")) return false
+        val lower = link.lowercase()
+        if (lower.contains("fromcoop=") || lower.contains("channel=sgtp")) return false
+        val isNaturalRedirect = lower.contains("sogou.com/link?url=")
+        if (isNaturalRedirect) return true
+        if (Regex("""https?://[^/]*\bsogou\.com""").containsMatchIn(lower)) return false
+        return snippet.isNotBlank()
     }
 
     private fun webSearch(query: String, limit: Int, engine: String?): String {
@@ -1146,7 +1250,7 @@ class AgentToolRegistry(
             fun fetch(url: String): Pair<String, String>? = webClient.newCall(
                 okhttp3.Request.Builder()
                     .url(url)
-                    .header("User-Agent", webUa)
+                    .header("User-Agent", searchUa)
                     .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.6")
                     .get()
                     .build()
@@ -1154,13 +1258,33 @@ class AgentToolRegistry(
                 if (!resp.isSuccessful) null else (resp.body?.string() ?: return@use null) to resp.request.url.toString()
             }
 
-            fun searchOnce(which: String): List<Triple<String, String, String>> = when (which) {
-                AgentConfig.SEARCH_SOGOU -> fetch("https://www.sogou.com/web?query=$encoded")
-                    ?.let { (body, finalUrl) -> parseSogouResults(body, limit, finalUrl) }.orEmpty()
-                AgentConfig.SEARCH_WECHAT -> fetch("https://weixin.sogou.com/weixin?type=2&query=$encoded")
-                    ?.let { (body, finalUrl) -> parseSogouResults(body, limit, finalUrl) }.orEmpty()
-                else -> fetch("https://cn.bing.com/search?q=$encoded&mkt=zh-CN&setlang=zh-CN")
-                    ?.let { (body, finalUrl) -> parseBingResults(body, limit, finalUrl) }.orEmpty()
+            val want = limit.coerceIn(1, MAX_SEARCH_RESULTS)
+
+            /** 取某引擎第 [page] 页（1-based）。各家分页参数不同：Bing 用 first=偏移，搜狗系用 page=页码。 */
+            fun fetchPage(which: String, page: Int): List<Triple<String, String, String>> = when (which) {
+                AgentConfig.SEARCH_SOGOU ->
+                    fetch("https://www.sogou.com/web?query=$encoded&page=$page")
+                        ?.let { (body, finalUrl) -> parseSogouResults(body, want, finalUrl) }.orEmpty()
+                AgentConfig.SEARCH_WECHAT ->
+                    fetch("https://weixin.sogou.com/weixin?type=2&query=$encoded&page=$page")
+                        ?.let { (body, finalUrl) -> parseSogouResults(body, want, finalUrl) }.orEmpty()
+                else ->
+                    fetch("https://cn.bing.com/search?q=$encoded&mkt=zh-CN&setlang=zh-CN&first=${(page - 1) * 10 + 1}")
+                        ?.let { (body, finalUrl) -> parseBingResults(body, want, finalUrl) }.orEmpty()
+            }
+
+            /**
+             * 一页大约 10 条，要凑够 [want] 就得翻页。翻到够为止，最多 [MAX_SEARCH_PAGES] 页；
+             * 某页没有新结果（去重后为空）就停——说明到底了，再翻是白等。
+             */
+            fun searchOnce(which: String): List<Triple<String, String, String>> {
+                val acc = LinkedHashMap<String, Triple<String, String, String>>()
+                for (page in 1..MAX_SEARCH_PAGES) {
+                    val before = acc.size
+                    fetchPage(which, page).forEach { r -> acc.putIfAbsent(r.second, r) }
+                    if (acc.size >= want || acc.size == before) break
+                }
+                return acc.values.take(want)
             }
             val primary = searchOnce(selectedEngine)
             val results = primary.ifEmpty {
@@ -1583,7 +1707,7 @@ class AgentToolRegistry(
     private suspend fun checkUpdate(): String {
         val cur = com.xjtu.toolbox.BuildConfig.VERSION_NAME
         val channel = runCatching { com.xjtu.toolbox.util.CredentialStore(context).updateChannel }
-            .getOrDefault(com.xjtu.toolbox.util.AppUpdater.CHANNEL_GITEE_STABLE)
+            .getOrDefault(com.xjtu.toolbox.util.AppUpdater.CHANNEL_GITEE)
         return try {
             val info = com.xjtu.toolbox.util.AppUpdater.check(channel)
                 ?: return "当前版本 v$cur；暂时没查到更新信息。"
@@ -1705,7 +1829,7 @@ class AgentToolRegistry(
                 append("• ${s.siteName} / ${s.siteKey}：")
                 append(if (s.hasLogin) "已登录" else "未登录")
                 append("，mode=${s.accessMode}")
-                if (!s.supportsWebVpn) append("，不走WebVPN")
+                if (!s.mustUseWebVpn) append("，不走WebVPN")
                 if (s.localTokenKeys.isNotEmpty()) append("，tokenKeys=${s.localTokenKeys.joinToString("/")}")
                 append("\n")
             }
@@ -1786,8 +1910,10 @@ class AgentToolRegistry(
         }
     }
 
-    private fun webFetch(url: String): String {
-        if (!url.startsWith("http")) return "URL 无效，需以 http/https 开头。"
+    private fun webFetch(rawUrl: String): String {
+        if (!rawUrl.startsWith("http")) return "URL 无效，需以 http/https 开头。"
+        // 校外 http:// 会被系统的明文策略直接拒绝，先升级为 https（见 preferHttps）
+        val url = preferHttps(rawUrl.trim())
         return try {
             webClient.newCall(
                 okhttp3.Request.Builder()
@@ -1829,7 +1955,14 @@ class AgentToolRegistry(
                 }
             }
         } catch (e: Exception) {
-            "抓取失败：${e.message ?: "网络异常"}"
+            val msg = e.message.orEmpty()
+            // 明文被系统策略拦截时，OkHttp 抛的是 UnknownServiceException，原文对模型没有指导性，
+            // 直接说清楚"这个站只有 HTTP、本机不允许"，让它换一条结果而不是反复重试同一个链接。
+            if (e is java.net.UnknownServiceException || msg.contains("CLEARTEXT", ignoreCase = true)) {
+                "抓取失败：$url 只提供不加密的 HTTP，出于安全策略本机不访问校外明文站点。请换一条 https 的结果。"
+            } else {
+                "抓取失败：${msg.ifBlank { "网络异常" }}"
+            }
         }
     }
 }

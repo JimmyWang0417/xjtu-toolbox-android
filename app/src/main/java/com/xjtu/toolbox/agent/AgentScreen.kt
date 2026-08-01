@@ -74,6 +74,16 @@ fun AgentScreen(onBack: () -> Unit, onNavigate: (String) -> Unit = {}) {
     // 多会话持久化：绑定一次，加载会话列表并恢复最近会话
     val sessionStore = remember { AgentSessionStore(context) }
     LaunchedEffect(Unit) { vm.bind(sessionStore) }
+
+    // 从主动提醒气泡进来时，**开一个新会话**并把提醒作为真实的第一条用户消息发出去。
+    // 不新建会话的话会接在上一次的对话尾巴上，用户看到的就是"老对话"，
+    // 跟刚才气泡说的事毫无关系。
+    LaunchedEffect(config.isConfigured) {
+        val pending = AgentPendingPrompt.consume() ?: return@LaunchedEffect
+        if (!config.isConfigured) return@LaunchedEffect
+        vm.newSession()
+        vm.sendMessage(pending, config, loginState, context)
+    }
     var drawerOpen by rememberSaveable { mutableStateOf(false) }
 
     val scrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
