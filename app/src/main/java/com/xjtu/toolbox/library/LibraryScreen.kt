@@ -101,44 +101,6 @@ fun LibraryScreen(site: SiteSession, onBack: () -> Unit) {
     // ── 首次使用提示 ──
     val prefs = remember { context.getSharedPreferences("feature_hints", Context.MODE_PRIVATE) }
     val showHint = remember { mutableStateOf(!prefs.getBoolean("library_hint_shown", false)) }
-    if (showHint.value) {
-        BackHandler { showHint.value = false; prefs.edit().putBoolean("library_hint_shown", true).apply() }
-        OverlayBottomSheet(
-            show = showHint.value,
-            title = "图书馆座位预约",
-            onDismissRequest = {
-                showHint.value = false
-                prefs.edit().putBoolean("library_hint_shown", true).apply()
-            }
-        ) {
-            Column(Modifier.padding(bottom = 16.dp).navigationBarsPadding()) {
-                Text("使用说明", style = MiuixTheme.textStyles.body2, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-                Spacer(Modifier.height(8.dp))
-
-                val tips = listOf(
-                    "💡" to "智能推荐算法会根据「桌组空闲度、邻座占用率、是否靠墙/角落、离入口距离」等因素为你打分推荐最佳座位。",
-                    "⏰" to "预约成功后，请在 30 分钟内入馆签到，否则当日将被禁止线上预约。",
-                    "📋" to "座位状态说明：「使用中」= 已签到入座；「已预约」 = 已预约未签到；「暂离」= 短暂离开保留中。",
-                    "🚫" to "本版本已移除定时抢座功能。频繁自动化请求可能触发学校系统风控，导致账号被限制使用图书馆服务，望理解。"
-                )
-                tips.forEach { (emoji, text) ->
-                    Row(Modifier.padding(vertical = 4.dp)) {
-                        Text(emoji, style = MiuixTheme.textStyles.body1)
-                        Spacer(Modifier.width(8.dp))
-                        Text(text, style = MiuixTheme.textStyles.body2, modifier = Modifier.weight(1f))
-                    }
-                }
-                Spacer(Modifier.height(16.dp))
-                Button(
-                    onClick = {
-                        showHint.value = false
-                        prefs.edit().putBoolean("library_hint_shown", true).apply()
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("知道了") }
-            }
-        }
-    }
 
     // 座位数据
     var seats by remember { mutableStateOf<List<SeatInfo>>(emptyList()) }
@@ -382,6 +344,50 @@ fun LibraryScreen(site: SiteSession, onBack: () -> Unit) {
             )
         }
     ) { padding ->
+
+        // ── 首次使用提示 ──
+        //
+        // 必须放在 Scaffold 的 content 里：miuix 0.9.3 起 Overlay* 注册进 LocalDialogStates，
+        // 而该 CompositionLocal 只有 Scaffold 提供。写在 Scaffold 外面会注册进一个没有宿主的
+        // 空列表，无宿主渲染，不报错也不崩溃，就是不显示。
+        if (showHint.value) {
+            BackHandler { showHint.value = false; prefs.edit().putBoolean("library_hint_shown", true).apply() }
+            OverlayBottomSheet(
+                show = showHint.value,
+                title = "图书馆座位预约",
+                onDismissRequest = {
+                    showHint.value = false
+                    prefs.edit().putBoolean("library_hint_shown", true).apply()
+                }
+            ) {
+                Column(Modifier.padding(bottom = 16.dp).navigationBarsPadding()) {
+                    Text("使用说明", style = MiuixTheme.textStyles.body2, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                    Spacer(Modifier.height(8.dp))
+
+                    val tips = listOf(
+                        "💡" to "智能推荐算法会根据「桌组空闲度、邻座占用率、是否靠墙/角落、离入口距离」等因素为你打分推荐最佳座位。",
+                        "⏰" to "预约成功后，请在 30 分钟内入馆签到，否则当日将被禁止线上预约。",
+                        "📋" to "座位状态说明：「使用中」= 已签到入座；「已预约」 = 已预约未签到；「暂离」= 短暂离开保留中。",
+                        "🚫" to "本版本已移除定时抢座功能。频繁自动化请求可能触发学校系统风控，导致账号被限制使用图书馆服务，望理解。"
+                    )
+                    tips.forEach { (emoji, text) ->
+                        Row(Modifier.padding(vertical = 4.dp)) {
+                            Text(emoji, style = MiuixTheme.textStyles.body1)
+                            Spacer(Modifier.width(8.dp))
+                            Text(text, style = MiuixTheme.textStyles.body2, modifier = Modifier.weight(1f))
+                        }
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    Button(
+                        onClick = {
+                            showHint.value = false
+                            prefs.edit().putBoolean("library_hint_shown", true).apply()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("知道了") }
+                }
+            }
+        }
         // 这两个 OverlayBottomSheet 必须放在 Scaffold content 内：miuix 弹窗靠 Scaffold 提供的
         // MiuixPopupHost(LocalPopupStates) 渲染；放在 Scaffold 外（且 App 根无 popup host）会永不显示，
         // 正是"换座/取消点了没反应、请求从未发出"的真因。
@@ -454,9 +460,16 @@ fun LibraryScreen(site: SiteSession, onBack: () -> Unit) {
             }
         }
 
+        // 下拉指示器只跟随真实的下拉手势：进入页面 / 切换区域等程序触发的加载
+        // 由内容区的 LoadingState 呈现，避免页面自己"演"一次下拉刷新动画。
+        var isPullRefreshing by remember { mutableStateOf(false) }
+        LaunchedEffect(isLoading, isLoadingBooking) {
+            if (!isLoading && !isLoadingBooking) isPullRefreshing = false
+        }
         top.yukonga.miuix.kmp.basic.PullToRefresh(
-            isRefreshing = isLoading || isLoadingBooking,
+            isRefreshing = isPullRefreshing,
             onRefresh = {
+                isPullRefreshing = true
                 loadSeats()
                 refreshMyBooking()
                 bookingResult = null
@@ -679,6 +692,15 @@ fun LibraryScreen(site: SiteSession, onBack: () -> Unit) {
             }
 
             Spacer(Modifier.height(4.dp))
+
+            // 已有座位数据时的静默刷新（切换区域/楼层）：用顶部细进度线提示，不清空列表
+            AnimatedVisibility(visible = isLoading && seats.isNotEmpty() && !isPullRefreshing) {
+                LinearProgressIndicator(
+                    progress = null,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    height = 2.dp
+                )
+            }
 
             // ── 内容区 ──
             when {

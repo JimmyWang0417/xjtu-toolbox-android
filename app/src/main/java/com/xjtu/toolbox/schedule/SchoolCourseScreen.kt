@@ -602,8 +602,9 @@ fun SchoolCourseScreen(
                 Spacer(Modifier.height(32.dp))
             }
         }
-    }
 
+        // 必须在 Scaffold 的 content 内（且在 LazyColumn 之外——item{} 不是 composable 上下文），
+        // 否则 OverlayBottomSheet 拿不到 Scaffold 提供的宿主，静默不显示。
     // ── 课程详情 BottomSheet ──
     detailCourse?.let { course ->
         CourseDetailSheet(
@@ -611,6 +612,8 @@ fun SchoolCourseScreen(
             onDismiss = { detailCourse = null }
         )
     }
+    }
+
 }
 
 // ── 课程卡片 ────────────────────────────────

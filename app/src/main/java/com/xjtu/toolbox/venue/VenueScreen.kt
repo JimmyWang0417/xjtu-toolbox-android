@@ -76,38 +76,6 @@ fun VenueScreen(site: SiteSession, onBack: () -> Unit) {
 
     val prefs = remember { context.getSharedPreferences("feature_hints", Context.MODE_PRIVATE) }
     val showHint = remember { mutableStateOf(!prefs.getBoolean("venue_hint_shown", false)) }
-    if (showHint.value) {
-        BackHandler { showHint.value = false; prefs.edit().putBoolean("venue_hint_shown", true).apply() }
-        OverlayBottomSheet(
-            show = showHint.value,
-            title = "功能说明",
-            onDismissRequest = {
-                showHint.value = false
-                prefs.edit().putBoolean("venue_hint_shown", true).apply()
-            }
-        ) {
-            Column(Modifier.padding(bottom = 16.dp).navigationBarsPadding()) {
-                Text(
-                    "场馆预约功能仅提供时段查询与预约操作。",
-                    style = MiuixTheme.textStyles.body1
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "• 不会提供自动抢选功能\n• 不会接入支付流程\n\n望理解，请尽量在校园网环境下使用。",
-                    style = MiuixTheme.textStyles.body2,
-                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary
-                )
-                Spacer(Modifier.height(16.dp))
-                Button(
-                    onClick = {
-                        showHint.value = false
-                        prefs.edit().putBoolean("venue_hint_shown", true).apply()
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("知道了") }
-            }
-        }
-    }
 
     // ─── 导航状态 ───
     var currentPage by remember { mutableStateOf<VenuePage>(VenuePage.VenueList) }
@@ -121,7 +89,6 @@ fun VenueScreen(site: SiteSession, onBack: () -> Unit) {
     var selectedVenue by remember { mutableStateOf<VenueApi.Venue?>(null) }
     var selectedDate by remember { mutableStateOf(LocalDate.now()) }
     var availableSlots by remember { mutableStateOf<List<VenueApi.AreaSlot>>(emptyList()) }
-    var lockedSlots by remember { mutableStateOf<List<VenueApi.AreaSlot>>(emptyList()) }
     var slotsLoading by remember { mutableStateOf(false) }
     var slotsError by remember { mutableStateOf<String?>(null) }
     var selectedSlots by remember { mutableStateOf<Set<VenueApi.AreaSlot>>(emptySet()) }
@@ -130,6 +97,7 @@ fun VenueScreen(site: SiteSession, onBack: () -> Unit) {
     var bookingInProgress by remember { mutableStateOf(false) }
     var bookingResult by remember { mutableStateOf<VenueApi.BookingResult?>(null) }
     val showCaptchaDialog = remember { mutableStateOf(false) }
+    var pendingOrder by remember { mutableStateOf<VenueApi.PendingOrder?>(null) }
     var captchaData by remember { mutableStateOf<VenueApi.CaptchaData?>(null) }
     var captchaLoading by remember { mutableStateOf(false) }
     var captchaError by remember { mutableStateOf<String?>(null) }
@@ -156,13 +124,8 @@ fun VenueScreen(site: SiteSession, onBack: () -> Unit) {
             try {
                 val date = selectedDate.format(DateTimeFormatter.ISO_LOCAL_DATE)
                 val venueId = selectedVenue!!.id
-                val (ok, locked) = withContext(Dispatchers.IO) {
-                    val ok = api.fetchAvailableSlots(venueId, date)
-                    val locked = api.fetchLockedSlots(venueId, date)
-                    ok to locked
-                }
+                val ok = withContext(Dispatchers.IO) { api.fetchAvailableSlots(venueId, date) }
                 availableSlots = ok
-                lockedSlots = locked
             } catch (e: AuthExpiredException) {
                 appLoginState.handleAuthExpired(LoginType.VENUE, Routes.VENUE, onBack)
             } catch (e: Exception) {
@@ -172,15 +135,15 @@ fun VenueScreen(site: SiteSession, onBack: () -> Unit) {
     }
 
     fun doBooking(sliderResult: SliderResult) {
-        val venue = selectedVenue ?: return
+        val order = pendingOrder ?: return
         val captcha = captchaData ?: return
         bookingInProgress = true
         scope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
                     api.submitBooking(
-                        serviceid = venue.id,
-                        selections = selectedSlots.toList(),
+                        serviceid = selectedVenue!!.id,
+                        pendingOrder = order,
                         captchaId = captcha.id,
                         sliderTrackJson = sliderResult.toJson()
                     )
@@ -196,41 +159,50 @@ fun VenueScreen(site: SiteSession, onBack: () -> Unit) {
         }
     }
 
+    /**
+     * 确认预订：先拿服务端 _param（prepareOrder），再拿滑块验证码，交给用户手动滑动。
+     *
+     * 这里**不做自动解题**。曾经的实现会用 Sobel 边缘模板匹配算出缺口位置、生成仿人轨迹
+     * 直接提交，成功时用户从头到尾看不到滑块——界面只是个转圈的弹窗，主观感受就是
+     * "点了确定预约没反应"，而一旦算错，用户连自己滑一次的机会都没有，直接收到预约失败。
+     * 现在一律由用户自己滑。
+     */
+    fun startBookingFlow() {
+        val venue = selectedVenue
+        if (venue == null) {
+            android.util.Log.w("VenueScreen", "startBookingFlow: selectedVenue is null, aborted")
+            return
+        }
+        android.util.Log.d("VenueScreen", "startBookingFlow: venue=${venue.id} slots=${selectedSlots.size}")
+        showCaptchaDialog.value = true
+        captchaLoading = true; captchaError = null; pendingOrder = null; captchaData = null
+        scope.launch {
+            try {
+                val order = withContext(Dispatchers.IO) {
+                    api.prepareOrder(venue.id, selectedSlots.toList())
+                }
+                pendingOrder = order
+                android.util.Log.d("VenueScreen", "startBookingFlow: prepareOrder ok")
+
+                captchaData = withContext(Dispatchers.IO) { api.generateCaptcha(venue.id) }
+                android.util.Log.d("VenueScreen", "startBookingFlow: captcha ready id=${captchaData?.id}")
+            } catch (e: AuthExpiredException) {
+                showCaptchaDialog.value = false
+                appLoginState.handleAuthExpired(LoginType.VENUE, Routes.VENUE, onBack)
+            } catch (e: Exception) {
+                android.util.Log.e("VenueScreen", "startBookingFlow failed", e)
+                captchaError = e.message ?: "获取验证码失败"
+            } finally { captchaLoading = false }
+        }
+    }
+
     fun loadCaptcha() {
+        val venue = selectedVenue ?: return
         captchaLoading = true; captchaError = null
         scope.launch {
             try {
-                val data = withContext(Dispatchers.IO) { api.generateCaptcha() }
+                val data = withContext(Dispatchers.IO) { api.generateCaptcha(venue.id) }
                 captchaData = data
-
-                // 尝试自动解题
-                val targetX = withContext(Dispatchers.Default) {
-                    autoSolveCaptcha(
-                        data.backgroundImage, data.sliderImage,
-                        data.bgWidth, data.bgHeight
-                    )
-                }
-                if (targetX != null) {
-                    // 自动解题成功 → 生成仿人轨迹并提交
-                    val track = generateHumanLikeTrack(targetX)
-                    val now = java.time.Instant.now()
-                    val start = now.minusMillis(track.last().t + 500)
-                    val fmt = java.time.format.DateTimeFormatter.ISO_INSTANT
-                    val slHeight = (data.sliderHeight * 260.0 / data.bgWidth).toInt()
-                    val result = SliderResult(
-                        bgImageWidth = 260,
-                        bgImageHeight = 0,
-                        sliderImageWidth = 0,
-                        sliderImageHeight = slHeight,
-                        startSlidingTime = fmt.format(start),
-                        entSlidingTime = fmt.format(now),
-                        trackList = track
-                    )
-                    captchaLoading = false
-                    doBooking(result)
-                    return@launch
-                }
-                // 自动解题失败 → 显示手动滑块
             } catch (e: Exception) {
                 captchaError = e.message ?: "获取验证码失败"
             } finally { captchaLoading = false }
@@ -287,6 +259,44 @@ fun VenueScreen(site: SiteSession, onBack: () -> Unit) {
             )
         }
     ) { padding ->
+
+        // ── 首次使用提示 ──
+        //
+        // 必须放在 Scaffold 的 content 里：miuix 0.9.3 起 Overlay* 注册进 LocalDialogStates，
+        // 而该 CompositionLocal 只有 Scaffold 提供。写在 Scaffold 外面会注册进一个没有宿主的
+        // 空列表，无宿主渲染，不报错也不崩溃，就是不显示。
+        if (showHint.value) {
+            BackHandler { showHint.value = false; prefs.edit().putBoolean("venue_hint_shown", true).apply() }
+            OverlayBottomSheet(
+                show = showHint.value,
+                title = "功能说明",
+                onDismissRequest = {
+                    showHint.value = false
+                    prefs.edit().putBoolean("venue_hint_shown", true).apply()
+                }
+            ) {
+                Column(Modifier.padding(bottom = 16.dp).navigationBarsPadding()) {
+                    Text(
+                        "场馆预约功能仅提供时段查询与预约操作。",
+                        style = MiuixTheme.textStyles.body1
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "• 不会提供自动抢选功能\n• 不会接入支付流程\n\n望理解，请尽量在校园网环境下使用。",
+                        style = MiuixTheme.textStyles.body2,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Button(
+                        onClick = {
+                            showHint.value = false
+                            prefs.edit().putBoolean("venue_hint_shown", true).apply()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("知道了") }
+                }
+            }
+        }
         AnimatedContent(
             targetState = currentPage,
             transitionSpec = {
@@ -325,7 +335,6 @@ fun VenueScreen(site: SiteSession, onBack: () -> Unit) {
                     date = selectedDate,
                     onDateChange = { selectedDate = it },
                     availableSlots = availableSlots,
-                    lockedSlots = lockedSlots,
                     selectedSlots = selectedSlots,
                     onToggleSlot = { slot ->
                         selectedSlots = if (slot in selectedSlots) selectedSlots - slot else selectedSlots + slot
@@ -333,134 +342,136 @@ fun VenueScreen(site: SiteSession, onBack: () -> Unit) {
                     isLoading = slotsLoading,
                     error = slotsError,
                     onRetry = { loadSlots() },
-                    onConfirm = {
-                        loadCaptcha()
-                        showCaptchaDialog.value = true
-                    },
+                    onConfirm = { startBookingFlow() },
                     modifier = Modifier.padding(padding),
                     scrollBehavior = scrollBehavior
                 )
             }
         }
-    }
 
-    // ─── 验证码弹窗 ───
-    if (showCaptchaDialog.value) {
-        BackHandler { showCaptchaDialog.value = false }
-        OverlayDialog(
-            title = "滑动验证",
-            show = showCaptchaDialog.value,
-            onDismissRequest = {
-                showCaptchaDialog.value = false
-            }
-        ) {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                when {
-                    captchaLoading -> {
-                        Spacer(Modifier.height(32.dp))
-                        CircularProgressIndicator()
-                        Spacer(Modifier.height(8.dp))
-                        Text("加载验证码...", style = MiuixTheme.textStyles.body2)
-                        Spacer(Modifier.height(32.dp))
-                    }
-                    captchaError != null -> {
-                        Text(captchaError!!, color = MiuixTheme.colorScheme.error)
-                        Spacer(Modifier.height(12.dp))
-                        Button(onClick = { loadCaptcha() }) { Text("重试") }
-                    }
-                    captchaData != null && !bookingInProgress -> {
-                        SliderCaptchaView(
-                            backgroundImageBase64 = captchaData!!.backgroundImage,
-                            sliderImageBase64 = captchaData!!.sliderImage,
-                            bgOriginalWidth = captchaData!!.bgWidth,
-                            bgOriginalHeight = captchaData!!.bgHeight,
-                            sliderOriginalWidth = captchaData!!.sliderWidth,
-                            sliderOriginalHeight = captchaData!!.sliderHeight,
-                            onSlideComplete = { result -> doBooking(result) }
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        TextButton(text = "换一张", onClick = { loadCaptcha() })
-                    }
-                    bookingInProgress -> {
-                        Spacer(Modifier.height(32.dp))
-                        CircularProgressIndicator()
-                        Spacer(Modifier.height(8.dp))
-                        Text("正在预订...", style = MiuixTheme.textStyles.body2)
-                        Spacer(Modifier.height(32.dp))
-                    }
-                }
-            }
-        }
-    }
+        // 弹窗必须写在 Scaffold 的 content 里：miuix 0.9.3 的 Overlay* 默认
+        // renderInRootScaffold=true，靠 Scaffold 提供的 LocalDialogStates 注册、
+        // 由 Scaffold 内部的 MiuixPopupHost 渲染。放在 Scaffold 外面（与它平级）时
+        // 拿到的是静态默认空列表，弹窗会被静默丢弃——不报错、不崩溃、就是不显示。
 
-    // ─── 预订结果弹窗 ───
-    if (showResultDialog.value && bookingResult != null) {
-        BackHandler {
-            showResultDialog.value = false
-            if (bookingResult!!.success) { selectedSlots = emptySet(); loadSlots() }
-        }
-        OverlayDialog(
-            title = if (bookingResult!!.success) "预订成功" else "预订失败",
-            show = showResultDialog.value,
-            onDismissRequest = {
-                showResultDialog.value = false
-                if (bookingResult!!.success) {
-                    selectedSlots = emptySet()
-                    loadSlots()
+        // ─── 验证码弹窗 ───
+        if (showCaptchaDialog.value) {
+            BackHandler { showCaptchaDialog.value = false }
+            OverlayDialog(
+                title = "滑动验证",
+                show = showCaptchaDialog.value,
+                onDismissRequest = {
+                    showCaptchaDialog.value = false
                 }
-            }
-        ) {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                val result = bookingResult!!
-                if (result.success) {
-                    Icon(
-                        Icons.Default.CheckCircle,
-                        contentDescription = null,
-                        modifier = Modifier.size(48.dp),
-                        tint = MiuixTheme.colorScheme.primary
-                    )
-                    Text(result.message, style = MiuixTheme.textStyles.body2, textAlign = TextAlign.Center)
-                    if (result.orderId != null) {
-                        Text("订单号: ${result.orderId}", style = MiuixTheme.textStyles.footnote1, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-                    }
-                    if (result.price > 0) {
-                        Text("金额: ¥${"%.1f".format(result.price)}", style = MiuixTheme.textStyles.body1, fontWeight = FontWeight.Bold, color = MiuixTheme.colorScheme.primary)
-                    }
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "请前往「移动交通大学」App 完成支付",
-                        style = MiuixTheme.textStyles.footnote1,
-                        color = MiuixTheme.colorScheme.error,
-                        fontWeight = FontWeight.Medium,
-                        textAlign = TextAlign.Center
-                    )
-                } else {
-                    Icon(
-                        Icons.Default.Warning,
-                        contentDescription = null,
-                        modifier = Modifier.size(48.dp),
-                        tint = MiuixTheme.colorScheme.error
-                    )
-                    Text(result.message, style = MiuixTheme.textStyles.body2, textAlign = TextAlign.Center, color = MiuixTheme.colorScheme.error)
-                }
-                Spacer(Modifier.height(8.dp))
-                Button(
-                    onClick = {
-                        showResultDialog.value = false
-                        if (result.success) {
-                            selectedSlots = emptySet()
-                            loadSlots()
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    when {
+                        captchaLoading -> {
+                            Spacer(Modifier.height(32.dp))
+                            CircularProgressIndicator()
+                            Spacer(Modifier.height(8.dp))
+                            Text("加载验证码...", style = MiuixTheme.textStyles.body2)
+                            Spacer(Modifier.height(32.dp))
                         }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("确定") }
+                        captchaError != null -> {
+                            Text(captchaError!!, color = MiuixTheme.colorScheme.error)
+                            Spacer(Modifier.height(12.dp))
+                            Button(onClick = { startBookingFlow() }) { Text("重试") }
+                        }
+                        captchaData != null && !bookingInProgress -> {
+                            SliderCaptchaView(
+                                backgroundImageBase64 = captchaData!!.backgroundImage,
+                                sliderImageBase64 = captchaData!!.sliderImage,
+                                bgOriginalWidth = captchaData!!.bgWidth,
+                                bgOriginalHeight = captchaData!!.bgHeight,
+                                sliderOriginalWidth = captchaData!!.sliderWidth,
+                                sliderOriginalHeight = captchaData!!.sliderHeight,
+                                onSlideComplete = { result -> doBooking(result) }
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            TextButton(text = "换一张", onClick = { loadCaptcha() })
+                        }
+                        bookingInProgress -> {
+                            Spacer(Modifier.height(32.dp))
+                            CircularProgressIndicator()
+                            Spacer(Modifier.height(8.dp))
+                            Text("正在预订...", style = MiuixTheme.textStyles.body2)
+                            Spacer(Modifier.height(32.dp))
+                        }
+                    }
+                }
+            }
+        }
+
+        // ─── 预订结果弹窗 ───
+        if (showResultDialog.value && bookingResult != null) {
+            BackHandler {
+                showResultDialog.value = false
+                if (bookingResult!!.success) { selectedSlots = emptySet(); loadSlots() }
+            }
+            OverlayDialog(
+                title = if (bookingResult!!.success) "预订成功" else "预订失败",
+                show = showResultDialog.value,
+                onDismissRequest = {
+                    showResultDialog.value = false
+                    if (bookingResult!!.success) {
+                        selectedSlots = emptySet()
+                        loadSlots()
+                    }
+                }
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val result = bookingResult!!
+                    if (result.success) {
+                        Icon(
+                            Icons.Default.CheckCircle,
+                            contentDescription = null,
+                            modifier = Modifier.size(48.dp),
+                            tint = MiuixTheme.colorScheme.primary
+                        )
+                        Text(result.message, style = MiuixTheme.textStyles.body2, textAlign = TextAlign.Center)
+                        if (result.orderId != null) {
+                            Text("订单号: ${result.orderId}", style = MiuixTheme.textStyles.footnote1, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                        }
+                        if (result.price > 0) {
+                            Text("金额: ¥${"%.1f".format(result.price)}", style = MiuixTheme.textStyles.body1, fontWeight = FontWeight.Bold, color = MiuixTheme.colorScheme.primary)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "请前往「移动交通大学」App 完成支付",
+                            style = MiuixTheme.textStyles.footnote1,
+                            color = MiuixTheme.colorScheme.error,
+                            fontWeight = FontWeight.Medium,
+                            textAlign = TextAlign.Center
+                        )
+                    } else {
+                        Icon(
+                            Icons.Default.Warning,
+                            contentDescription = null,
+                            modifier = Modifier.size(48.dp),
+                            tint = MiuixTheme.colorScheme.error
+                        )
+                        Text(result.message, style = MiuixTheme.textStyles.body2, textAlign = TextAlign.Center, color = MiuixTheme.colorScheme.error)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            showResultDialog.value = false
+                            if (result.success) {
+                                selectedSlots = emptySet()
+                                loadSlots()
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("确定") }
+                }
             }
         }
     }
@@ -614,7 +625,6 @@ private fun SlotSelectionContent(
     date: LocalDate,
     onDateChange: (LocalDate) -> Unit,
     availableSlots: List<VenueApi.AreaSlot>,
-    lockedSlots: List<VenueApi.AreaSlot>,
     selectedSlots: Set<VenueApi.AreaSlot>,
     onToggleSlot: (VenueApi.AreaSlot) -> Unit,
     isLoading: Boolean,
@@ -651,9 +661,6 @@ private fun SlotSelectionContent(
                 val slotsByTime = remember(availableSlots) {
                     availableSlots.groupBy { it.timeSlot }.toSortedMap()
                 }
-                val lockedSet = remember(lockedSlots) {
-                    lockedSlots.map { it.areaId to it.timeSlot }.toSet()
-                }
 
                 LazyColumn(
                     modifier = Modifier
@@ -668,7 +675,6 @@ private fun SlotSelectionContent(
                             TimeSlotGroup(
                                 timeSlot = timeSlot,
                                 slots = slots,
-                                lockedSet = lockedSet,
                                 selectedSlots = selectedSlots,
                                 onToggleSlot = onToggleSlot
                             )
@@ -790,7 +796,6 @@ private fun DateSelector(
 private fun TimeSlotGroup(
     timeSlot: String,
     slots: List<VenueApi.AreaSlot>,
-    lockedSet: Set<Pair<Long, String>>,
     selectedSlots: Set<VenueApi.AreaSlot>,
     onToggleSlot: (VenueApi.AreaSlot) -> Unit
 ) {
@@ -828,9 +833,8 @@ private fun TimeSlotGroup(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 slots.forEach { slot ->
-                    val isLocked = (slot.areaId to slot.timeSlot) in lockedSet
                     val isSelected = slot in selectedSlots
-                    val canSelect = slot.isAvailable && !isLocked
+                    val canSelect = slot.isAvailable
 
                     SlotChip(
                         areaName = slot.areaName,

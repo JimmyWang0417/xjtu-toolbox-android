@@ -17,8 +17,8 @@ import top.yukonga.miuix.kmp.basic.HorizontalDivider
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.SmallTitle
-import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
-import top.yukonga.miuix.kmp.overlay.OverlayDialog
+import top.yukonga.miuix.kmp.window.WindowBottomSheet
+import top.yukonga.miuix.kmp.window.WindowDialog
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import androidx.compose.runtime.*
@@ -158,10 +158,14 @@ fun CustomCourseDialog(
 
     val showDeleteConfirm = remember { mutableStateOf(false) }
 
-    // ── 删除确认 (OverlayDialog) ──
+    // ── 删除确认 ──
+    //
+    // 用 Window* 而不是 Overlay*：Overlay* 要靠 Scaffold 提供的 LocalDialogStates 宿主才会
+    // 被渲染，而本组件的两个调用点（ScheduleScreen 的添加/编辑日程）都在该页 Scaffold **之前**，
+    // 拿不到宿主 —— 注册进一个空列表，不报错也不崩溃，就是永远不显示，表现为「点添加日程没反应」。
     if (existing != null && showDeleteConfirm.value) {
         BackHandler { showDeleteConfirm.value = false }
-        OverlayDialog(
+        WindowDialog(
             show = showDeleteConfirm.value,
             title = "删除日程",
             summary = "确定要删除「${existing.courseName}」吗？此操作不可恢复。",
@@ -187,7 +191,7 @@ fun CustomCourseDialog(
         show.value = false
         onDismiss()
     }
-    OverlayBottomSheet(
+    WindowBottomSheet(
         show = show.value,
         title = if (isEdit) "编辑日程" else "添加日程",
         onDismissRequest = {
