@@ -395,7 +395,7 @@ private fun ChatPanel(
 
     fun send() {
         val text = input.trim()
-        if (text.isBlank()) return
+        if (text.isBlank() || vm.contextExhausted) return
         input = ""
         keyboard?.hide()
         vm.sendMessage(text, config, loginState, context)
@@ -458,7 +458,8 @@ private fun ChatPanel(
                 TextField(
                     value = input,
                     onValueChange = { input = it },
-                    label = "输入消息…",
+                    label = if (vm.contextExhausted) AgentViewModel.CONTEXT_EXHAUSTED_MESSAGE else "输入消息…",
+                    enabled = !vm.contextExhausted,
                     modifier = Modifier.weight(1f),
                     singleLine = false,
                     maxLines = 4,
@@ -477,12 +478,12 @@ private fun ChatPanel(
                 } else {
                     IconButton(
                         onClick = { send() },
-                        enabled = input.isNotBlank()
+                        enabled = input.isNotBlank() && !vm.contextExhausted
                     ) {
                         Icon(
                             Icons.AutoMirrored.Filled.Send,
                             contentDescription = "发送",
-                            tint = if (input.isNotBlank()) MiuixTheme.colorScheme.primary
+                            tint = if (input.isNotBlank() && !vm.contextExhausted) MiuixTheme.colorScheme.primary
                             else MiuixTheme.colorScheme.outline
                         )
                     }

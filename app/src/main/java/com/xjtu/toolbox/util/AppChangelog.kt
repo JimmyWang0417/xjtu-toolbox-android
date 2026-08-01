@@ -25,6 +25,11 @@ object AppChangelog {
      * 新增版本只在最前面追加即可。
      */
     val ENTRIES: List<Pair<String, VersionChangelog>> = listOf(
+        "4.5.1" to VersionChangelog(
+            items = listOf(
+                "🧠" to "屁岱不再按消息条数截断对话，改用 DeepSeek 返回的 Token 用量管理超长上下文"
+            )
+        ),
         "4.5" to VersionChangelog(
             items = listOf(
                 "🎓" to "「我的」页新增学籍档案：证件照、书院、专业班级，以及辅导员和班主任的联系方式",

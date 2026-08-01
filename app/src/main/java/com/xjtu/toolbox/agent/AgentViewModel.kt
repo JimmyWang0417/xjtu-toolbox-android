@@ -32,9 +32,17 @@ data class ChatMessage(
 )
 
 class AgentViewModel : ViewModel() {
+    companion object {
+        private const val CONTEXT_TOKEN_LIMIT = 800_000L
+        const val CONTEXT_EXHAUSTED_MESSAGE = "本对话上下文已达到上限，请新建对话后继续。"
+    }
+
     val messages = mutableStateListOf<ChatMessage>()
     var isLoading by mutableStateOf(false)
     var errorMessage by mutableStateOf<String?>(null)
+    var contextExhausted by mutableStateOf(false)
+        private set
+    private var lastTotalTokens: Long? = null
 
     // ── 多会话状态 ──────────────────────────────────────────────────────
     val sessions = mutableStateListOf<AgentSession>()
@@ -59,26 +67,6 @@ class AgentViewModel : ViewModel() {
 
     /** 停止正在进行的生成。 */
     fun stop() { currentJob?.cancel() }
-
-    /** 直接截断过长历史：保留 system + 最近若干条，并去掉开头孤儿的 tool/带tool_calls的assistant。 */
-    private fun truncateHistory() {
-        val max = 50
-        if (llmHistory.size() <= max) return
-        val items = (0 until llmHistory.size()).map { llmHistory[it].asJsonObject }
-        val system = items.firstOrNull { it.get("role")?.asString == "system" }
-        val rest = items.filter { it !== system }
-        val keep = rest.takeLast(max - (if (system != null) 1 else 0)).toMutableList()
-        while (keep.isNotEmpty()) {
-            val first = keep.first()
-            val role = first.get("role")?.asString
-            val hasToolCalls = first.has("tool_calls") && !first.get("tool_calls").isJsonNull
-            if (role == "tool" || (role == "assistant" && hasToolCalls)) keep.removeAt(0) else break
-        }
-        llmHistory = JsonArray().apply {
-            system?.let { add(it) }
-            keep.forEach { add(it) }
-        }
-    }
 
     /**
      * 修复历史完整性：丢弃"带 tool_calls 却没有(完整) tool 回应"的 assistant 残体，以及孤儿 tool 消息。
@@ -128,6 +116,7 @@ class AgentViewModel : ViewModel() {
         val s = store.create()
         currentSessionId = s.id
         messages.clear(); llmHistory = JsonArray(); systemPromptAdded = false; tools = null; errorMessage = null
+        lastTotalTokens = null; contextExhausted = false
         refreshSessions()
     }
 
@@ -148,6 +137,8 @@ class AgentViewModel : ViewModel() {
             ))
         }
         llmHistory = runCatching { JsonParser.parseString(convo.llmHistory).asJsonArray }.getOrDefault(JsonArray())
+        lastTotalTokens = convo.lastTotalTokens
+        contextExhausted = convo.contextExhausted
         systemPromptAdded = llmHistory.any {
             runCatching { it.asJsonObject.get("role")?.asString == "system" }.getOrDefault(false)
         }
@@ -190,7 +181,7 @@ class AgentViewModel : ViewModel() {
         val title = if (store.isLocked(id))
             sessions.firstOrNull { it.id == id }?.title ?: deriveTitle()
         else deriveTitle()
-        store.save(id, StoredConversation(stored, llmHistory.toString()), title)
+        store.save(id, StoredConversation(stored, llmHistory.toString(), lastTotalTokens, contextExhausted), title)
         refreshSessions()
     }
 
@@ -236,6 +227,10 @@ class AgentViewModel : ViewModel() {
         context: Context
     ) {
         if (userText.isBlank() || isLoading) return
+        if (contextExhausted) {
+            errorMessage = CONTEXT_EXHAUSTED_MESSAGE
+            return
+        }
         if (currentSessionId == null) newSession()
         errorMessage = null
         messages.add(ChatMessage("user", userText))
@@ -292,7 +287,6 @@ class AgentViewModel : ViewModel() {
                     addProperty("content", "${nowTag()}\n$userText")
                 })
                 sanitizeHistory()   // 自愈：清掉上一次中断留下的 tool_calls 残体
-                truncateHistory()   // 过长则直接截断旧消息
 
                 val calledTools = mutableListOf<String>()
                 val toolBubbleIndices = mutableListOf<Int>()
@@ -362,6 +356,10 @@ class AgentViewModel : ViewModel() {
                             messages.add(ChatMessage("tool_event", label, isToolCall = true))
                             toolBubbleIndices.add(messages.lastIndex)
                         }
+                    },
+                    onUsage = { totalTokens ->
+                        lastTotalTokens = totalTokens
+                        if (totalTokens >= CONTEXT_TOKEN_LIMIT) contextExhausted = true
                     }
                 )
 
@@ -438,6 +436,8 @@ class AgentViewModel : ViewModel() {
         llmHistory = JsonArray()
         systemPromptAdded = false
         errorMessage = null
+        lastTotalTokens = null
+        contextExhausted = false
         // tools 保留（loginFailedAt 冷却状态有价值），不在 clearMessages 时重置
         persist()
     }

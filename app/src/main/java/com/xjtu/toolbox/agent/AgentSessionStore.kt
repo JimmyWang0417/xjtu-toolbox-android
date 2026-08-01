@@ -36,7 +36,9 @@ data class StoredMessage(
 /** 一个会话的完整内容：UI 消息 + 供续聊的 LLM 历史（JsonArray 的字符串形式）。 */
 data class StoredConversation(
     val messages: List<StoredMessage> = emptyList(),
-    val llmHistory: String = "[]"
+    val llmHistory: String = "[]",
+    val lastTotalTokens: Long? = null,
+    val contextExhausted: Boolean = false
 )
 
 /**

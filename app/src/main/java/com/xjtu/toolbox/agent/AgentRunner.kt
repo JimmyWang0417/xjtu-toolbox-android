@@ -72,7 +72,8 @@ class AgentRunner(private val tools: AgentToolRegistry) {
         val content: String,
         val reasoningContent: String,
         val toolCalls: List<ToolCallAcc>,
-        val finishReason: String
+        val finishReason: String,
+        val totalTokens: Long?
     )
 
     private val json = "application/json; charset=utf-8".toMediaType()
@@ -89,7 +90,8 @@ class AgentRunner(private val tools: AgentToolRegistry) {
         config: AgentConfig,
         onToolCall: (name: String) -> Unit = {},
         onDelta: suspend (String) -> Unit = {},
-        onReasoningDelta: suspend (String) -> Unit = {}
+        onReasoningDelta: suspend (String) -> Unit = {},
+        onUsage: (Long) -> Unit = {}
     ): String {
         val toolDefs = JsonParser.parseString(tools.toolDefinitions).asJsonArray
         var toolCallCount = 0
@@ -102,6 +104,7 @@ class AgentRunner(private val tools: AgentToolRegistry) {
                 add("messages", messagesForProvider(messages, config))
                 addProperty("stream", true)
                 if (config.provider == AgentConfig.PROVIDER_DEEPSEEK) {
+                    add("stream_options", JsonObject().apply { addProperty("include_usage", true) })
                     add("thinking", JsonObject().apply {
                         addProperty("type", if (config.thinkingEnabled) "enabled" else "disabled")
                     })
@@ -118,6 +121,7 @@ class AgentRunner(private val tools: AgentToolRegistry) {
             val sr = withContext(Dispatchers.IO) {
                 streamOnce(reqBody, config, onDelta, onReasoningDelta)
             }
+            sr.totalTokens?.let(onUsage)
 
             if (sr.finishReason == "length" && sr.content.isBlank() && sr.toolCalls.isEmpty())
                 return "回复被截断（超出模型上下文限制）。请新开对话或缩短问题。"
@@ -241,6 +245,7 @@ class AgentRunner(private val tools: AgentToolRegistry) {
                 val reasoningSb = StringBuilder()
                 val toolMap = sortedMapOf<Int, ToolCallAcc>()
                 var finishReason = "stop"
+                var totalTokens: Long? = null
 
                 while (true) {
                     currentCoroutineContext().ensureActive()
@@ -254,6 +259,9 @@ class AgentRunner(private val tools: AgentToolRegistry) {
                     val data = line.substring(5).trim()
                     if (data == "[DONE]") break
                     val chunk = runCatching { JsonParser.parseString(data).asJsonObject }.getOrNull() ?: continue
+                    chunk.get("usage")?.takeIf { !it.isJsonNull && it.isJsonObject }?.asJsonObject
+                        ?.get("total_tokens")
+                        ?.takeIf { !it.isJsonNull }?.asLong?.let { totalTokens = it }
                     val choices = chunk.getAsJsonArray("choices") ?: continue
                     if (choices.size() == 0) continue
                     val choice = choices[0].asJsonObject
@@ -285,7 +293,8 @@ class AgentRunner(private val tools: AgentToolRegistry) {
                     contentSb.toString(),
                     reasoningSb.toString(),
                     toolMap.values.filter { it.name.isNotBlank() },
-                    finishReason
+                    finishReason,
+                    totalTokens
                 )
             }
         } finally {
