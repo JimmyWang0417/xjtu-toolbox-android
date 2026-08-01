@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -6,8 +8,11 @@ plugins {
 
 android {
     namespace = "com.xjtu.toolbox"
+    // compileSdk 跟随 miuix（BuildConfig.COMPILE_SDK = 37）：composite build 要求消费方的
+    // compileSdk 不低于依赖方，否则 CheckAarMetadata 直接失败。这只是「用哪套 SDK 编译」，
+    // 不影响设备兼容范围。minSdk / targetSdk 保持不动。
     compileSdk {
-        version = release(36) {
+        version = release(37) {
         }
     }
 
@@ -30,13 +35,20 @@ android {
                 keyAlias = System.getenv("KEY_ALIAS")
                 keyPassword = System.getenv("KEY_PASSWORD")
             } else {
-                // 本地开发：从项目根目录读取 release.jks
+                // 本地开发：release.jks + keystore.properties（两者都已 gitignore）。
+                // 口令不写在源码里——这个文件是要提交的，硬编码等于把签名密钥口令公开。
+                // 缺任一文件则不配置签名，release 构建产出未签名包。
                 val localKeystore = rootProject.file("release.jks")
-                if (localKeystore.exists()) {
+                val props = rootProject.file("keystore.properties")
+                if (localKeystore.exists() && props.exists()) {
+                    // 顶部 import java.util.Properties：Kotlin DSL 里裸 `java.` 会被
+                    // Gradle 的 java 扩展遮蔽，只能靠 import 引入
+                    val p = Properties()
+                    props.inputStream().use { p.load(it) }
                     storeFile = localKeystore
-                    storePassword = "XjtuToolbox2026!"
-                    keyAlias = "xjtu-toolbox"
-                    keyPassword = "XjtuToolbox2026!"
+                    storePassword = p.getProperty("storePassword")
+                    keyAlias = p.getProperty("keyAlias")
+                    keyPassword = p.getProperty("keyPassword")
                 }
             }
             // minSdk=31 全覆盖 V3 支持范围（API≥28），强制启用以获得更强签名保护和密钥轮换能力
@@ -90,9 +102,12 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
-    implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.2")
-    implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.2")
-    implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.2")
+    // 版本号仅为占位：settings.gradle.kts 的 dependencySubstitution 会把这三个坐标
+    // 替换成 includeBuild("miuix-ref") 里的本地工程，实际编译的永远是源码树当前状态。
+    implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.3")
+    implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.3")
+    implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.3")
+    implementation("top.yukonga.miuix.kmp:miuix-squircle-android:0.9.3")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
