@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -191,9 +192,12 @@ fun AccountManagerScreen(
             }
 
             Spacer(Modifier.height(28.dp))
-        }
-    }
 
+            // ── 四个账号操作弹窗 ──
+            //
+            // 必须写在 Scaffold 的 content 内：miuix 0.9.3 起 Overlay* 注册进
+            // LocalDialogStates，而该 CompositionLocal 只有 Scaffold 提供。
+            // 写在 Scaffold 外拿到的是静态默认空列表，无宿主渲染，静默不显示。
     // ── 新增账号弹窗 ──
     if (showAddSheet) {
         AddAccountDialog(
@@ -301,6 +305,9 @@ fun AccountManagerScreen(
             onDismiss = { pendingDelete = null }
         )
     }
+        }
+    }
+
 }
 
 @Composable
@@ -568,6 +575,14 @@ private fun AccountAvatar(
     )
     val label = account?.let { accountTitle(it).take(1).uppercase() }
 
+    // 学工系统证件照，按账号各自缓存。没登录过 hello 的账号自然没有，退回首字母。
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val photo = remember(account?.accountId) {
+        account?.accountId?.let {
+            com.xjtu.toolbox.hello.HelloProfileStore.cachedAvatarFor(context, it)
+        }
+    }
+
     Box(
         modifier = Modifier
             .size(size.dp)
@@ -575,15 +590,20 @@ private fun AccountAvatar(
             .background(gradient),
         contentAlignment = Alignment.Center
     ) {
-        if (label == null) {
-            Icon(
+        when {
+            photo != null -> androidx.compose.foundation.Image(
+                bitmap = photo.asImageBitmap(),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop
+            )
+            label == null -> Icon(
                 Icons.Default.Person,
                 contentDescription = null,
                 tint = if (isActive) MiuixTheme.colorScheme.onPrimary else accent,
                 modifier = Modifier.size((size * 0.46f).dp)
             )
-        } else {
-            Text(
+            else -> Text(
                 label,
                 color = if (isActive) MiuixTheme.colorScheme.onPrimary else accent,
                 style = textSize,
