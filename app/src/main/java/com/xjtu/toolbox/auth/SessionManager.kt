@@ -42,7 +42,7 @@ data class SessionSiteSnapshot(
     val siteName: String,
     val hasLogin: Boolean,
     val accessMode: String,
-    val supportsWebVpn: Boolean,
+    val mustUseWebVpn: Boolean,
     val localTokenKeys: List<String>,
 )
 
@@ -66,8 +66,12 @@ class SessionManager(context: Context) {
     private var backends: Map<AccessMode, SessionBackend> = buildBackends(null)
 
     private fun buildBackends(accountSuffix: String?): Map<AccessMode, SessionBackend> {
-        val normalJar = PersistentCookieJar(appContext, "cookies_normal$accountSuffix")
-        val webvpnJar = PersistentCookieJar(appContext, "cookies_webvpn$accountSuffix")
+        // suffix 为 null 时用 "_default"：直接插值会拼出字面量 "cookies_normalnull"，
+        // 白白留下一个谁也不会再读的加密 prefs 文件（启动后 restoreActiveAccount 立刻用
+        // 真实账号后缀重建 backends）。与 AccountManager 注销时用的 "_default" 命名空间对齐。
+        val suffix = accountSuffix ?: "_default"
+        val normalJar = PersistentCookieJar(appContext, "cookies_normal$suffix")
+        val webvpnJar = PersistentCookieJar(appContext, "cookies_webvpn$suffix")
         return mapOf(
             AccessMode.NORMAL to SessionBackend(AccessMode.NORMAL, normalJar),
             AccessMode.WEBVPN to SessionBackend(
@@ -109,8 +113,13 @@ class SessionManager(context: Context) {
         return site
     }
 
+    /**
+     * [SiteSession.mustUseWebVpn] = false 的站点被永久锁定在 [AccessMode.NORMAL]（直连原域名），
+     * 不会跟随全局网络检测切到 WEBVPN。这类站点若域名当前仍仅限校内网络可达，校外需要用户自行
+     * 连接校园官方 VPN 或回到校园网——App 内置的 WebVPN 代理对它们不生效。
+     */
     private fun backendFor(site: SiteSession): SessionBackend {
-        val mode = if (!site.supportsWebVpn) AccessMode.NORMAL else _currentAccessMode.value
+        val mode = if (!site.mustUseWebVpn) AccessMode.NORMAL else _currentAccessMode.value
         return backends.getValue(mode)
     }
 
@@ -118,6 +127,11 @@ class SessionManager(context: Context) {
         sites[siteKey] ?: error("SiteSession[$siteKey] not registered")
 
     fun getSiteOrNull(siteKey: String): SiteSession? = sites[siteKey]
+
+    /** 让所有站点会话失效（不动 cookies）。切换 access mode / 切换账号时使用。 */
+    fun invalidateAllSites() {
+        sites.values.forEach { it.invalidateLogin() }
+    }
 
     val activeSiteCount: Int get() = sites.values.count { it.hasLogin }
     val activeSiteKeys: List<String> get() = sites.values.filter { it.hasLogin }.map { it.siteKey }
@@ -129,7 +143,7 @@ class SessionManager(context: Context) {
                 siteName = site.siteName,
                 hasLogin = site.hasLogin,
                 accessMode = site.currentAccessMode.key,
-                supportsWebVpn = site.supportsWebVpn,
+                mustUseWebVpn = site.mustUseWebVpn,
                 localTokenKeys = site.localToken.keys.sorted(),
             )
         }
@@ -275,6 +289,26 @@ class SessionManager(context: Context) {
                             recordDiagnostic("ERROR", "webvpn", "WebVPN 凭据无效：$msg")
                             throw PasswordInvalidatedException("WebVPN", msg)
                         }
+                        // 网关**已登录**时，/login?cas_login=true 不会给登录页，而是 302 去它
+                        // 记住的上次访问地址。那可能是某个业务 API（真机实测跳到了
+                        // ncard 的 queryCard），不带业务会话自然返回 401/403——但这跟网关
+                        // 认证成没成功毫无关系。只要落地在 webvpn 的 /https/... 代理路径上，
+                        // 就说明网关认了我们，否则它只会把我们挡在登录页。
+                        //
+                        // 不做这个判断的后果（已发生）：网关明明是好的，却被判失败并触发
+                        // 60 秒登录冷却，期间所有走 WebVPN 的站点全部连不上。
+                        if (backend.cookieJar.findCookieByName("wengine_vpn_ticketwebvpn_xjtu_edu_cn") != null ||
+                            com.xjtu.toolbox.util.WebVpnUtil.getOriginalUrl(login.finalUrl) != null
+                        ) {
+                            backend.webvpnSelfLoggedIn = true
+                            clearLoginFailure("webvpn")
+                            recordDiagnostic(
+                                "INFO", "webvpn",
+                                "WebVPN 网关已认证（落地页返回 $msg，属目标业务接口响应，非网关问题）"
+                            )
+                            Log.d(TAG, "WebVPN gateway already authenticated; ignoring target-site status: $msg")
+                            return@withLock
+                        }
                         reportLoginFailure("webvpn")
                         throw IOException("WebVPN 登录失败：$msg")
                     }
@@ -293,6 +327,76 @@ class SessionManager(context: Context) {
                         result = withContext(Dispatchers.IO) { login.login(accountType = accountType) }
                     }
                 }
+            }
+        }
+    }
+
+    // ── 后台预热 / 保活（均为「免密」路径） ──────────────────
+    //
+    // 前提：TGC 已在 cookie jar 中。此时任何 CAS 站点的登录都是纯 SSO 跳转，
+    // **不携带密码、不经 CasGate 的凭据闸门**，因此可以放心地在后台做——
+    // 它对统一认证的压力与用户点开一个页面无异，却把等待挪出了用户的关键路径。
+    //
+    // 三条自我约束：
+    // 1. 没有 TGC 就直接放弃（绝不为了预热而提交密码）。
+    // 2. 全程 silent：撞到 MFA 立即退出，不弹窗、不发短信。
+    // 3. 站点间留间隔、失败静默吞掉，不重试、不上报失败冷却。
+
+    /**
+     * 该站点当前是否具备「免密 SSO」条件。必须按**站点实际绑定的 backend** 判断：
+     * NORMAL 与 WEBVPN 两个 jar 各有自己的 TGC，用 any() 一概而论会让校外场景下的预热
+     * 退化成后台密码登录。
+     */
+    private fun canSsoSilently(site: SiteSession): Boolean {
+        val b = site.backend ?: return false
+        if (runCatching { b.cookieJar.findCookieByName("TGC") }.getOrNull() == null) return false
+        // WebVPN 网关自身尚未认证时不碰：ensureWebVpnLogin 是带密码的，且可能弹 MFA。
+        if (site.currentAccessMode == AccessMode.WEBVPN && !b.webvpnSelfLoggedIn) return false
+        return true
+    }
+
+    /**
+     * 预热指定站点（通常是「上次用过的几个」）。逐个串行、每个之间留间隔。
+     * 任何异常都只记录不抛出——预热失败对用户不可见，最多回到「点开时再登」。
+     */
+    suspend fun prewarmSites(siteKeys: List<String>, gapMs: Long = 300L) {
+        if (siteKeys.isEmpty()) return
+        val creds = credentials ?: return
+        if (_passwordInvalidated.value) return
+        for ((i, key) in siteKeys.withIndex()) {
+            val site = sites[key] ?: continue
+            if (site.hasLogin) continue
+            if (!canSsoSilently(site)) {
+                Log.d(TAG, "prewarm skipped $key: no silent-SSO path (won't submit password in background)")
+                continue
+            }
+            if (i > 0) kotlinx.coroutines.delay(gapMs)
+            try {
+                site.ensureLogin(creds.first, creds.second, silent = true)
+                Log.d(TAG, "prewarm ok: $key")
+            } catch (e: Exception) {
+                Log.d(TAG, "prewarm skipped $key: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * 保活：对**已登录**站点做一次探活，失效则免密 SSO 续期。
+     * 让"放置一段时间后第一次点功能要等完整 CAS"这件事发生在后台，而不是用户面前。
+     *
+     * TGC 也过期时**直接跳过**，不在后台补一次密码登录：那样一旦密码在服务端被改过，
+     * 用户不在场的情况下会连撞三次触发全局熔断。让用户下次主动进入时付这一次代价更可控。
+     */
+    suspend fun refreshLoggedInSites(gapMs: Long = 2_000L) {
+        val creds = credentials ?: return
+        if (_passwordInvalidated.value) return
+        val live = sites.values.filter { it.hasLogin && canSsoSilently(it) }
+        for ((i, site) in live.withIndex()) {
+            if (i > 0) kotlinx.coroutines.delay(gapMs)
+            try {
+                site.ensureLogin(creds.first, creds.second, silent = true)
+            } catch (e: Exception) {
+                Log.d(TAG, "keepalive skipped ${site.siteKey}: ${e.message}")
             }
         }
     }
@@ -345,7 +449,7 @@ class SessionManager(context: Context) {
             backends.values.forEach { runCatching { it.client.connectionPool.evictAll() } }
             backends = buildBackends(accountSuffix)
         }
-        // 重新绑定每个 site 到新 backend；supportsWebVpn=false 的 site 永远绑 NORMAL
+        // 重新绑定每个 site 到新 backend；mustUseWebVpn=false 的 site 永远绑 NORMAL（直连，不代表校外可用）
         sites.values.forEach {
             it.backend = backendFor(it)
             it.invalidateLogin()

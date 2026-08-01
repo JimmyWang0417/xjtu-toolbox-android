@@ -10,7 +10,7 @@ import okhttp3.OkHttpClient
 class JiaoxiaozhiSiteSession : CasSiteSession(
     siteKey = SITE_KEY,
     siteName = "交晓智",
-    supportsWebVpn = false,
+    mustUseWebVpn = false,
 ) {
     @Volatile private var authenticatedClient: OkHttpClient? = null
 

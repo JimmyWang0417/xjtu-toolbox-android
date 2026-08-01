@@ -24,7 +24,16 @@ import java.util.concurrent.locks.ReentrantLock
  */
 object CasGate {
     private const val TAG = "CasGate"
-    private const val MIN_INTERVAL_MS = 4_000L
+
+    /**
+     * 间隔平滑是**自适应**的：
+     * - 上一次凭据提交成功（consecutiveFailures == 0）→ [MIN_INTERVAL_OK_MS]。
+     *   风控针对的是「短时间大量失败提交」这种撞库形态，正常成功登录之间不需要秒级静默；
+     *   全局串行本身已经杜绝了并发爆发。
+     * - 一旦出现失败 → 立刻回到 [MIN_INTERVAL_FAIL_MS]，叠加 ≥3 次后的指数退避。
+     */
+    private const val MIN_INTERVAL_OK_MS = 800L
+    private const val MIN_INTERVAL_FAIL_MS = 4_000L
     private const val BACKOFF_BASE_MS = 30_000L
     private const val BACKOFF_MAX_MS = 10 * 60_000L
     private const val FAILURE_THRESHOLD = 3
@@ -46,16 +55,22 @@ object CasGate {
     /**
      * 在闸门保护下执行一次「携带密码的认证请求」。
      * 会阻塞当前线程做间隔平滑（调用方均在 IO 线程，安全）。
+     *
+     * @param sameFlow true 表示本次提交与上一次提交属于**同一登录流程**
+     *（如 mfa/detect 之后紧跟的登录表单 POST——浏览器也是连续发出的两个请求）。
+     * 同流程内不再做间隔平滑，只保留串行 + 熔断/退避检查；
+     * 最小间隔仅约束两次**独立登录流程**之间的节奏。
      */
     @Throws(ThrottledException::class)
-    fun <T> withCredentialPost(block: () -> T): T {
+    fun <T> withCredentialPost(sameFlow: Boolean = false, block: () -> T): T {
         checkAllowed()
         lock.lock()
         try {
             checkAllowed() // 等锁期间状态可能已变化（他人失败触发退避 / 密码熔断）
+            val minInterval = if (consecutiveFailures == 0) MIN_INTERVAL_OK_MS else MIN_INTERVAL_FAIL_MS
             val sinceLast = SystemClock.elapsedRealtime() - lastPostAt
-            if (sinceLast in 0 until MIN_INTERVAL_MS) {
-                val wait = MIN_INTERVAL_MS - sinceLast
+            if (!sameFlow && sinceLast in 0 until minInterval) {
+                val wait = minInterval - sinceLast
                 Log.d(TAG, "spacing credential post by ${wait}ms")
                 try {
                     Thread.sleep(wait)

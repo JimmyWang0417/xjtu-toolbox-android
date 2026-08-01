@@ -17,13 +17,24 @@ fun LoginType.siteKey(): String = when (this) {
     LoginType.SUPER_APP -> "super_app"
     LoginType.FITNESS -> "fitness"
     LoginType.JIAOXIAOZHI -> "jiaoxiaozhi"
+    LoginType.ICLASSFACE -> "iclassface"
 }
 
-suspend fun SessionManager.ensureSite(siteKey: String): SiteSession {
+/**
+ * @param userInitiated 用户正在前台等这次结果（点功能入口）。为 true 时豁免站点级 60 秒失败冷却
+ * ——防刷仍由 CasGate 的全局串行 + 失败退避 + 密码熔断保证。
+ */
+suspend fun SessionManager.ensureSite(
+    siteKey: String,
+    userInitiated: Boolean = false,
+): SiteSession {
     val site = getSite(siteKey)
     val creds = credentials ?: throw AuthExpiredException(site.siteName, "未配置凭据")
-    site.ensureLogin(creds.first, creds.second)
+    site.ensureLogin(creds.first, creds.second, userInitiated = userInitiated)
     return site
 }
 
-suspend fun SessionManager.ensureSite(type: LoginType): SiteSession = ensureSite(type.siteKey())
+suspend fun SessionManager.ensureSite(
+    type: LoginType,
+    userInitiated: Boolean = false,
+): SiteSession = ensureSite(type.siteKey(), userInitiated)

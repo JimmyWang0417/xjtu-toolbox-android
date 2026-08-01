@@ -19,7 +19,10 @@ class SuperAppLogin(
 
     override fun postLogin(response: Response) {
         val finalUrl = response.request.url.toString()
-        if ("superapp.xjtu.edu.cn" !in finalUrl) {
+        // WebVPN 模式下 finalUrl 是加密后的 webvpn.xjtu.edu.cn/... 地址，域名部分被
+        // AES 加密编码，不会再包含明文 "superapp.xjtu.edu.cn"。用 WebVpnUtil.isAtTargetSite
+        // 而不是简单字符串 contains，兼容直连 / WebVPN 两种模式（同其他已支持 WebVPN 的站点）。
+        if (!com.xjtu.toolbox.util.WebVpnUtil.isAtTargetSite(finalUrl, "superapp.xjtu.edu.cn")) {
             throw RuntimeException("移动交大登录回调异常")
         }
         launchUrl = finalUrl

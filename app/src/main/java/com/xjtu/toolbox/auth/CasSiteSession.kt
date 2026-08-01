@@ -1,5 +1,7 @@
 package com.xjtu.toolbox.auth
 
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
 import java.io.IOException
 
@@ -17,8 +19,8 @@ import java.io.IOException
 abstract class CasSiteSession(
     siteKey: String,
     siteName: String,
-    supportsWebVpn: Boolean = true,
-) : SiteSession(siteKey, siteName, supportsWebVpn) {
+    mustUseWebVpn: Boolean = true,
+) : SiteSession(siteKey, siteName, mustUseWebVpn) {
 
     /** 子类提供本站的 [XJTULogin] 实例工厂。OkHttpClient 已绑定 backend cookieJar，子类直接传入即可。 */
     protected abstract fun createLogin(
@@ -88,7 +90,24 @@ abstract class CasSiteSession(
         }
     }
 
+    /**
+     * TGC 引导：cookie jar 里还没有 TGC 时，全局只放一个站点去做「带密码的首次登录」，
+     * 其余站点在此排队。等第一个建好 TGC 后，排队者各自的 [XJTULogin] init 会直接 SSO 直通
+     * ——既不重复提交密码（风控上更干净），也不必再去等 [CasGate] 的间隔平滑。
+     *
+     * 之前的行为：N 个站点并发首登时都在 TGC 建立前抓到了 CAS 登录表单，于是 N 次密码 POST
+     * 在闸门里逐个排队，每个还要 +4s 平滑 —— 首次进任何功能都要等好几秒的根源。
+     */
     override suspend fun runLogin(username: String, password: String) {
+        val jar = checkNotNull(backend) { "[$siteKey] backend not bound" }.cookieJar
+        if (jar.findCookieByName("TGC") == null) {
+            tgcBootstrapLock.withLock { runCasLogin(username, password) }
+        } else {
+            runCasLogin(username, password)
+        }
+    }
+
+    private suspend fun runCasLogin(username: String, password: String) {
         val backend = checkNotNull(backend) { "[$siteKey] backend not bound" }
         val xl = createLogin(
             client = backend.client,
@@ -114,6 +133,10 @@ abstract class CasSiteSession(
                 LoginState.REQUIRE_MFA -> {
                     val ctx = result.mfaContext
                         ?: throw IOException("$siteName 未返回 MFA 上下文")
+                    // 静默流程（后台预热/保活）到此为止：不弹窗、不发短信，交回给用户下次主动进入时处理。
+                    if (silentLogin) {
+                        throw IOException("$siteName 需要验证码，后台静默流程已跳过")
+                    }
                     // SAFETY_VERIFY 流程已在 XJTULogin 内自动发送过验证码，无需重复发；
                     // MFA_DETECT 流程需要主动触发短信下发。
                     if (ctx.flow == MFAFlow.MFA_DETECT) {
@@ -148,4 +171,9 @@ abstract class CasSiteSession(
             msg.contains("密码错误", ignoreCase = true) ||
             msg.contains("账号或密码", ignoreCase = true) ||
             msg.contains("401")
+
+    companion object {
+        /** 全局唯一：所有 CAS 站点共用的 TGC 引导锁。 */
+        private val tgcBootstrapLock = Mutex()
+    }
 }

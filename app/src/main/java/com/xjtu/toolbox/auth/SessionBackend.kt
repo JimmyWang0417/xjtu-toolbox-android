@@ -3,6 +3,7 @@ package com.xjtu.toolbox.auth
 import com.xjtu.toolbox.util.PersistentCookieJar
 import kotlinx.coroutines.sync.Mutex
 import okhttp3.ConnectionPool
+import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
 import okhttp3.brotli.BrotliInterceptor
 import java.util.concurrent.TimeUnit
@@ -19,7 +20,9 @@ import java.util.concurrent.TimeUnit
 class SessionBackend(
     val accessMode: AccessMode,
     val cookieJar: PersistentCookieJar,
-    connectionPool: ConnectionPool = ConnectionPool(5, 30, TimeUnit.SECONDS),
+    // 连接池放宽：一次登录要在 login.xjtu.edu.cn / 业务域之间来回十几跳，
+    // 30 秒 keep-alive 撑不过用户在页面上的停顿，回来又要重新 TLS 握手（校园网上常 200-600ms/次）。
+    connectionPool: ConnectionPool = ConnectionPool(8, 5, TimeUnit.MINUTES),
     private val webVpnInterceptor: okhttp3.Interceptor? = null,
 ) {
     /**
@@ -33,7 +36,13 @@ class SessionBackend(
         .followRedirects(true)
         .followSslRedirects(true)
         .connectionPool(connectionPool)
-        .connectTimeout(30, TimeUnit.SECONDS)
+        // 所有业务几乎都打在同一个 host 上，默认 maxRequestsPerHost=5 会把页面内的并发请求排队
+        .dispatcher(Dispatcher().apply {
+            maxRequests = 32
+            maxRequestsPerHost = 16
+        })
+        // 连不上就早点失败并让上层重试，比干等 30 秒体感好得多；读超时保持 30 秒（成绩单生成等接口确实慢）
+        .connectTimeout(12, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()

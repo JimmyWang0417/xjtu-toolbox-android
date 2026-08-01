@@ -82,6 +82,15 @@ object SessionKeepAlive {
         provider = p
     }
 
+    /**
+     * 新会话架构的保活钩子（[SessionManager.refreshLoggedInSites]）。
+     *
+     * 业务站点早已迁到 SiteSession，[LoginProvider] 现在返回空列表 —— 也就是说这个循环
+     * 每 10 分钟醒来一次却什么都不做，会话该凉还是凉，代价转嫁成"用户点开时等一次完整 CAS"。
+     * 这里把它接回去：全程免密（有 TGC 才走 SSO）、静默（撞 MFA 直接退出）。
+     */
+    @Volatile var sessionRefresher: (suspend () -> Unit)? = null
+
     /** 启动循环。重复调用是幂等的（仅在未运行时启动）。 */
     fun start(context: Context) {
         if (loopJob?.isActive == true) return
@@ -122,6 +131,15 @@ object SessionKeepAlive {
     }
 
     private suspend fun runOnce() {
+        // 新架构：SiteSession 保活（免密 + 静默）
+        sessionRefresher?.let {
+            try {
+                it()
+            } catch (e: Exception) {
+                Log.w(TAG, "session refresh failed: ${e.message}")
+            }
+        }
+
         val snap = provider?.snapshot() ?: return
         Log.d(TAG, "tick: ${snap.logins.size} logins, vpn=${snap.vpnClient != null}")
 

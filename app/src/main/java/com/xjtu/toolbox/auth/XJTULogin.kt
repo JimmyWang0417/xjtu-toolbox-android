@@ -277,6 +277,13 @@ open class XJTULogin(
     var hasLogin: Boolean = false
         private set
 
+    /**
+     * init 阶段 SSO 尝试遇到非表单错误页（如目标服务 404/5xx）时的错误信息。
+     * 非空时 [login] 应直接返回 FAIL，不再尝试走"输入账号密码"的正常登录流程
+     * ——真实原因是目标服务不可达，跟账密无关，硬走密码流程只会误触发风控。
+     */
+    private var ssoErrorMessage: String? = null
+
     // MFA 上下文
     var mfaContext: MFAContext? = null
         private set
@@ -329,6 +336,24 @@ open class XJTULogin(
         android.util.Log.d(TAG, "init: responseCode=${response.code}, postUrl=$postUrl")
         android.util.Log.d(TAG, "init: responseBodyLen=${responseBody.length}")
 
+        // 走 WebVPN 时 postUrl 的域名段是 AES 加密的十六进制，光看日志根本不知道 404 的是
+        // 哪个站——iclassface 那次就是卡在这（ISSUES.md 第 12 项）。出错时把整条重定向链
+        // 的原始地址还原出来打印，下次一眼定位，不必再靠事后手工解密猜。
+        if (response.code >= 400) {
+            val chain = generateSequence(response) { it.priorResponse }.toList().reversed()
+            android.util.Log.w(TAG, "init: HTTP ${response.code} for loginUrl=$loginUrl")
+            chain.forEachIndexed { i, r ->
+                val raw = r.request.url.toString()
+                val plain = com.xjtu.toolbox.util.WebVpnUtil.getOriginalUrl(raw) ?: raw
+                android.util.Log.w(TAG, "  hop$i ${r.code} $plain")
+                // Location 原文是判断"谁把我们打回根路径"的唯一证据：是目标站自己 302 到 /，
+                // 还是网关改写 Location 时丢了 /https/{hex} 前缀。二者修法完全不同。
+                r.header("Location")?.let { android.util.Log.w(TAG, "  hop$i Location: $it") }
+                r.header("Set-Cookie")?.let { android.util.Log.w(TAG, "  hop$i Set-Cookie: ${it.take(120)}") }
+                if (i == chain.lastIndex) android.util.Log.w(TAG, "  hop$i rawUrl: $raw")
+            }
+        }
+
         // 提取 execution value（如果页面是登录表单）
         executionInput = extractExecutionValue(responseBody)
 
@@ -345,8 +370,12 @@ open class XJTULogin(
             hasLogin = false
             mfaEnabled = false
             captureSafetyVerify(response, responseBody)
-        } else if (executionInput.isEmpty() && existingClient != null) {
-            // SSO: 共享的 CookieManager 携带 TGC，CAS 自动完成认证并跳转到目标服务
+        } else if (executionInput.isEmpty() && existingClient != null && response.code < 400) {
+            // SSO: 共享的 CookieManager 携带 TGC，CAS 自动完成认证并跳转到目标服务。
+            // 必须校验 response.code < 400——"无登录表单"不等于"跳转成功"：目标服务
+            // 域名不可达/挂了时同样会返回一个无表单的 404/5xx 错误页，若不check状态码，
+            // 会被误判为 SSO 成功，postUrl（即这个错误页地址）会被当作登录终点返回给
+            // 上层（如移动交大 WebView 直接加载这个 404 页面）。
             hasLogin = true
             mfaEnabled = false
             try {
@@ -362,6 +391,11 @@ open class XJTULogin(
                 hasLogin = false
                 android.util.Log.e(TAG, "init: SSO postLogin failed", e)
             }
+        } else if (executionInput.isEmpty() && existingClient != null && response.code >= 400) {
+            // 无登录表单但状态码异常（如目标服务 404/5xx）：不能判定为 SSO 成功，
+            // 也不应走"正常登录"流程（那是给账密表单场景用的，与此处无关）。
+            android.util.Log.w(TAG, "init: SSO attempt got error status ${response.code}, not treating as success. Body preview: ${responseBody.take(500)}")
+            ssoErrorMessage = "目标服务返回错误（HTTP ${response.code}），可能暂时不可用"
         } else if (executionInput.isEmpty() && existingClient == null) {
             // 无 existingClient 但页面不是登录表单 → 可能是错误页面
             android.util.Log.w(TAG, "init: No execution found and no existingClient! Body preview: ${responseBody.take(500)}")
@@ -412,6 +446,13 @@ open class XJTULogin(
             this.jcaptcha = jcaptcha
         }
 
+        // init 阶段 SSO 尝试撞到非表单错误页（如目标服务 404/5xx）：直接返回 FAIL，
+        // 不走下面"输入账号密码"的正常登录流程——那是给账密表单场景设计的，此处的
+        // 失败原因是目标服务不可达，跟账密无关。
+        ssoErrorMessage?.let { msg ->
+            return LoginResult(LoginState.FAIL, msg)
+        }
+
         // ── 挂起的 SAFETY_VERIFY：init SSO 阶段 postLogin 撞到 Safety Verify 时已把
         //    mfaContext 写好但 hasLogin=false。此时 lastSafetyVerifyResponse 还未填，
         //    需要返回 REQUIRE_MFA 让 UI 弹验证码、verifyCode() 提交表单后再次进入主流程。
@@ -448,6 +489,7 @@ open class XJTULogin(
         }
 
         // MFA 检测
+        var detectedInThisFlow = false
         if (mfaEnabled && !hasLogin && (mfaContext == null || !mfaContext!!.required)) {
             android.util.Log.d("XJTULogin", "login: MFA detect starting")
             val formBody = FormBody.Builder()
@@ -477,6 +519,7 @@ open class XJTULogin(
             val state = data.get("state").asString
             val need = data.get("need").asBoolean
             mfaContext = MFAContext(this, state, need)
+            detectedInThisFlow = true
 
             if (need) {
                 return LoginResult(LoginState.REQUIRE_MFA, mfaContext = mfaContext)
@@ -516,8 +559,9 @@ open class XJTULogin(
             .build()
 
         // 使用原始 client（自动重定向）。凭据 POST 经 CasGate 全局串行 + 限频，防风控。
+        // 刚在本次 login() 内做过 mfa/detect 时，登录 POST 属于同一流程，免去重复间隔平滑。
         android.util.Log.d("XJTULogin", "login: POST to $postUrl")
-        val loginResponse = CasGate.withCredentialPost { client.newCall(request).execute() }
+        val loginResponse = CasGate.withCredentialPost(sameFlow = detectedInThisFlow) { client.newCall(request).execute() }
         val loginBody = loginResponse.body?.string() ?: ""
         android.util.Log.d("XJTULogin", "login: POST response code=${loginResponse.code}, finalUrl=${loginResponse.request.url}, bodyLen=${loginBody.length}")
 

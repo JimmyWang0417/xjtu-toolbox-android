@@ -31,9 +31,16 @@ class VenueLogin(
         private const val TAG = "VenueLogin"
         @Volatile private var lastSessionValidFromPostLogin: Boolean = false
 
-        /** 场馆系统基础地址 */
+        /**
+         * 场馆系统基础地址。
+         *
+         * 注意：抓包实证全站请求都走默认 80 端口，从未出现 :8071。原 APP_URL
+         * 常量把 :8071 当成真实访问端口是错的——那段文本只在滑块验证码提交时
+         * 作为服务端要求的固定校验字符串出现（见 VenueApi.kt submitBooking 的
+         * yzm 拼接），不代表真实端口。此处不再区分 BASE_URL/APP_URL，统一用
+         * BASE_URL。
+         */
         const val BASE_URL = "http://202.117.17.144"
-        const val APP_URL = "http://202.117.17.144:8071"
 
         /**
          * CAS OAuth2.0 授权 URL
@@ -79,7 +86,7 @@ class VenueLogin(
             sessionValid = com.xjtu.toolbox.util.WebVpnUtil.isAtTargetSite(indexFinalUrl, "202.117.17.144")
             if (!sessionValid) {
                 val appResp = client.newCall(
-                    Request.Builder().url("$APP_URL/product/index.html").get().build()
+                    Request.Builder().url("$BASE_URL/product/index.html").get().build()
                 ).execute()
                 val appFinalUrl = appResp.request.url.toString()
                 val appBody = appResp.peekBody(4096).string()
@@ -106,12 +113,12 @@ class VenueLogin(
     fun authenticatedRequest(url: String): Request.Builder {
         return Request.Builder()
             .url(url)
-            .header("Referer", "$APP_URL/product/index.html")
+            .header("Referer", "$BASE_URL/product/index.html")
     }
 
     override fun validateLogin(): Boolean {
         return try {
-            val request = Request.Builder().url("$APP_URL/product/index.html").get().build()
+            val request = Request.Builder().url("$BASE_URL/product/index.html").get().build()
             val response = client.newCall(request).execute()
             val finalUrl = response.request.url.toString()
             val body = response.peekBody(4096).string()
@@ -139,7 +146,7 @@ class VenueLogin(
         try {
             // 检查 session 是否仍有效
             val checkReq = Request.Builder()
-                .url("$APP_URL/product/index.html")
+                .url("$BASE_URL/product/index.html")
                 .get()
                 .build()
             val checkResp = client.newCall(checkReq).execute()

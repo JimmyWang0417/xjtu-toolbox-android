@@ -22,7 +22,10 @@ import java.net.URLDecoder
 
 // ── JWXT 教务系统 ─────────────────────────────────────────────────────
 
-class JwxtSession : CasSiteSession("jwxt", "教务系统", supportsWebVpn = false) {
+// mustUseWebVpn=false：永远直连原域名。护网结束后 jwxt 已放开公网直连，校外通常也可用，
+// 但这是学校当前网络策略决定的，不是本字段保证的行为——若域名被重新收紧仅限校内，
+// 校外需连接校园官方 VPN 或回到校园网，App 内置 WebVPN 代理对本站点不生效。
+class JwxtSession : CasSiteSession("jwxt", "教务系统", mustUseWebVpn = false) {
     override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
         JwxtLogin(session = client, visitorId = visitorId, cachedRsaKey = cachedRsaKey)
 
@@ -32,7 +35,10 @@ class JwxtSession : CasSiteSession("jwxt", "教务系统", supportsWebVpn = fals
         ).execute()
         try {
             val finalUrl = resp.request.url.toString()
-            resp.code == 200 && "login.xjtu.edu.cn" !in finalUrl
+            // WebVPN 下被踢回 CAS 时 URL 是 webvpn.xjtu.edu.cn/https/{加密login域名}/cas/login…，
+            // 明文 "login.xjtu.edu.cn" 不出现，`!in` 反而成立 → 失效会话被误判为"仍然有效"，
+            // 于是跳过重登，后续接口拿到的是登录页。isAtTargetSite 兼容直连/WebVPN 两种模式。
+            resp.code == 200 && com.xjtu.toolbox.util.WebVpnUtil.isAtTargetSite(finalUrl, "jwxt.xjtu.edu.cn")
         } finally { resp.close() }
     }
 
@@ -43,7 +49,9 @@ class JwxtSession : CasSiteSession("jwxt", "教务系统", supportsWebVpn = fals
 
 // ── JWAPP 移动教务系统 ───────────────────────────────────────────────
 
-class JwappSession : CasSiteSession("jwapp", "移动教务", supportsWebVpn = false) {
+// mustUseWebVpn=false：永远直连原域名。CAS 入口走 org.xjtu.edu.cn 开放平台，若该入口
+// 与 jwapp.xjtu.edu.cn 本身对公网开放，校外可直连；若学校收紧访问，需连校园官方 VPN。
+class JwappSession : CasSiteSession("jwapp", "移动教务", mustUseWebVpn = false) {
     override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
         JwappLogin(session = client, visitorId = visitorId, cachedRsaKey = cachedRsaKey)
 
@@ -82,7 +90,7 @@ class JwappSession : CasSiteSession("jwapp", "移动教务", supportsWebVpn = fa
 
 // ── YWTB 一网通办 ─────────────────────────────────────────────────────
 
-class YwtbSession : CasSiteSession("ywtb", "一网通办", supportsWebVpn = true) {
+class YwtbSession : CasSiteSession("ywtb", "一网通办", mustUseWebVpn = true) {
     override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
         YwtbLogin(session = client, visitorId = visitorId, cachedRsaKey = cachedRsaKey)
 
@@ -107,7 +115,7 @@ class YwtbSession : CasSiteSession("ywtb", "一网通办", supportsWebVpn = true
 
 // ── LIBRARY 图书馆座位 ────────────────────────────────────────────────
 
-class LibrarySession : CasSiteSession("library", "图书馆", supportsWebVpn = true) {
+class LibrarySession : CasSiteSession("library", "图书馆", mustUseWebVpn = true) {
     override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
         LibraryLogin(existingClient = client, visitorId = visitorId)
 
@@ -117,28 +125,69 @@ class LibrarySession : CasSiteSession("library", "图书馆", supportsWebVpn = t
         ).execute()
         try {
             val finalUrl = resp.request.url.toString()
-            resp.code in 200..399 && "login.xjtu.edu.cn" !in finalUrl
+            // 同 JwxtSession：WebVPN 下明文域名判断会把失效会话误判为有效。
+            resp.code in 200..399 &&
+                com.xjtu.toolbox.util.WebVpnUtil.isAtTargetSite(finalUrl, "rg.lib.xjtu.edu.cn")
         } finally { resp.close() }
     }
 }
 
 // ── LMS 思源学堂 ─────────────────────────────────────────────────────
 
-class LmsSession : CasSiteSession("lms", "思源学堂", supportsWebVpn = false) {
+// mustUseWebVpn=false：永远直连原域名。护网结束后 lms.xjtu.edu.cn 已放开公网直连，
+// 校外通常也可用；若学校重新收紧，需连校园官方 VPN 或回到校园网。
+class LmsSession : CasSiteSession("lms", "思源学堂", mustUseWebVpn = false) {
     override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
         com.xjtu.toolbox.lms.LmsLogin(session = client, visitorId = visitorId, cachedRsaKey = cachedRsaKey)
 }
 
 // ── CLASS 课程回放 ────────────────────────────────────────────────────
 
-class ClassSession : CasSiteSession("class", "课程回放", supportsWebVpn = false) {
+// mustUseWebVpn=false：永远直连原域名，公网可达性未逐一验证，取决于学校当前网络策略。
+class ClassSession : CasSiteSession("class", "课程回放", mustUseWebVpn = false) {
     override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
         com.xjtu.toolbox.classreplay.ClassLogin(session = client, visitorId = visitorId, cachedRsaKey = cachedRsaKey)
 }
 
+// ── ICLASSFACE 人脸识别签到 ──────────────────────────────────────────────
+
+class IclassfaceSession : CasSiteSession("iclassface", "快速考勤流水", mustUseWebVpn = true) {
+    override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
+        com.xjtu.toolbox.iclassface.IclassfaceLogin(session = client, visitorId = visitorId, cachedRsaKey = cachedRsaKey)
+}
+
+// ── HELLO 迎新/个人信息 ────────────────────────────────────────────────
+
+/**
+ * hello.xjtu.edu.cn。凭据是登录落地 URL 上的 JWT，不是 cookie，所以必须在
+ * [onLoginSuccess] 里把它转存到 localToken 供 [com.xjtu.toolbox.hello.HelloApi] 取用。
+ */
+class HelloSession : CasSiteSession("hello", "个人信息", mustUseWebVpn = true) {
+    override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
+        com.xjtu.toolbox.hello.HelloLogin(session = client, visitorId = visitorId, cachedRsaKey = cachedRsaKey)
+
+    override fun onLoginSuccess(login: XJTULogin) {
+        val hello = login as? com.xjtu.toolbox.hello.HelloLogin
+        if (hello == null) {
+            android.util.Log.w("HelloSession", "onLoginSuccess: unexpected login type ${login.javaClass.name}")
+            return
+        }
+        hello.accessToken.takeIf { it.isNotBlank() }?.let { localToken["access_token"] = it }
+        localToken["system_type"] = hello.systemType
+        android.util.Log.d(
+            "HelloSession",
+            "onLoginSuccess: tokenLen=${hello.accessToken.length} stored=${localToken.containsKey("access_token")} keys=${localToken.keys}"
+        )
+    }
+
+    // 令牌是否还在只能靠实际调用来判断，这里不额外做一次探活往返：
+    // 业务请求失败时 executeWithReAuth 会自愈重登。
+    override suspend fun validateLogin(): Boolean = localToken["access_token"].isNullOrBlank().not()
+}
+
 // ── JIAOCAI 教材中心 ──────────────────────────────────────────────────
 
-class JiaocaiSession : CasSiteSession("jiaocai", "教材中心", supportsWebVpn = true) {
+class JiaocaiSession : CasSiteSession("jiaocai", "教材中心", mustUseWebVpn = true) {
     override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
         com.xjtu.toolbox.jiaocai.JiaocaiLogin(existingClient = client, visitorId = visitorId, cachedRsaKey = cachedRsaKey)
 
@@ -151,7 +200,7 @@ class JiaocaiSession : CasSiteSession("jiaocai", "教材中心", supportsWebVpn 
 
 // ── COUPON 餐券 ──────────────────────────────────────────────────────
 
-class CouponSession : CasSiteSession("coupon", "餐券系统", supportsWebVpn = true) {
+class CouponSession : CasSiteSession("coupon", "餐券系统", mustUseWebVpn = false) {
     override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
         CouponLogin(session = client, visitorId = visitorId, cachedRsaKey = cachedRsaKey)
 
@@ -174,16 +223,23 @@ class CouponSession : CasSiteSession("coupon", "餐券系统", supportsWebVpn = 
     }
 }
 
-class SuperAppSession : CasSiteSession("super_app", "移动交大", supportsWebVpn = false) {
+// mustUseWebVpn=true：跟随全局网络检测在 NORMAL/WEBVPN 间切换，校外走 WebVPN 代理。
+// 产品决策（非技术判定）：superapp.xjtu.edu.cn 主域名在此前一次真机测试里校外
+// 直连本身是通的（能拿到 200 + ticket），但站内子服务（如 jwapp）的二次 CAS 接力
+// 在校外出现 404，为保证整站体验一致改为统一走 WebVPN。
+class SuperAppSession : CasSiteSession("super_app", "移动交大", mustUseWebVpn = true) {
     override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
         SuperAppLogin(session = client, visitorId = visitorId, cachedRsaKey = cachedRsaKey)
 
     override fun onLoginSuccess(login: XJTULogin) {
         val superApp = login as? SuperAppLogin ?: return
+        // WebVPN 模式下 launchUrl 是加密后的 webvpn.xjtu.edu.cn/... 地址，域名部分被加密，
+        // 不能再用字符串 contains("superapp.xjtu.edu.cn") 判断，需用 isAtTargetSite 兼容两种模式。
+        fun isValidLaunchUrl(url: String) =
+            com.xjtu.toolbox.util.WebVpnUtil.isAtTargetSite(url, "superapp.xjtu.edu.cn") && url.contains("ticket=")
         val launchUrl = superApp.launchUrl
-            .takeIf { it.contains("superapp.xjtu.edu.cn") && it.contains("ticket=") }
-            ?: SuperAppLogin.lastSuccessfulLaunchUrl
-                .takeIf { it.contains("superapp.xjtu.edu.cn") && it.contains("ticket=") }
+            .takeIf(::isValidLaunchUrl)
+            ?: SuperAppLogin.lastSuccessfulLaunchUrl.takeIf(::isValidLaunchUrl)
             ?: superApp.launchUrl
         android.util.Log.d(
             "SuperAppSession",
@@ -200,14 +256,29 @@ class SuperAppSession : CasSiteSession("super_app", "移动交大", supportsWebV
             Request.Builder().url(SuperAppLogin.HOME_URL).get().build()
         ).execute()
         try {
-            response.code == 200 && "login.xjtu.edu.cn" !in response.request.url.host
+            // WebVPN 模式下失效会跳到 webvpn.xjtu.edu.cn/https/{加密login.xjtu.edu.cn}/...，
+            // host 字面上不是 "login.xjtu.edu.cn"，仅凭 host 字符串排除判断不出来，
+            // 用 isAtTargetSite 才能兼容两种模式正确判断是否仍停留在登录页。
+            response.code == 200 &&
+                com.xjtu.toolbox.util.WebVpnUtil.isAtTargetSite(
+                    response.request.url.toString(), "superapp.xjtu.edu.cn"
+                )
         } finally {
             response.close()
         }
     }
 }
 
-class FitnessSession : CasSiteSession("fitness", "体测查询", supportsWebVpn = false) {
+/**
+ * 体测查询。钉死直连（`mustUseWebVpn = false`），与 jwxt/jwapp/lms/class 同策略——
+ * 这些域名公网可达，多绕一层 WebVPN 网关只会更慢。
+ *
+ * 2026-08-01 排查记录：校外点体测必失败，直连 `tyxylp.xjtu.edu.cn` 秒回 **HTTP 502**。
+ * 一度据此推断"校外不可达、应改走 WebVPN"，遂改为跟随全局模式——**实测证伪**：
+ * 走 WebVPN（从校园网内部发起）拿到的仍是同一个 502。两条独立路径同样结果，
+ * 说明反向代理是通的、接不到后端，即体测应用自身故障，与访问路径无关。故已改回直连。
+ */
+class FitnessSession : CasSiteSession("fitness", "体测查询", mustUseWebVpn = false) {
     override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
         com.xjtu.toolbox.fitness.FitnessLogin(
             session = client,
@@ -224,7 +295,7 @@ class FitnessSession : CasSiteSession("fitness", "体测查询", supportsWebVpn 
 
 // ── DZPZ 电子凭证（成绩单） ───────────────────────────────────────────
 
-class DzpzSession : CasSiteSession("dzpz", "电子凭证", supportsWebVpn = true) {
+class DzpzSession : CasSiteSession("dzpz", "电子凭证", mustUseWebVpn = false) {
     override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
         DzpzLogin(session = client, visitorId = visitorId, cachedRsaKey = cachedRsaKey)
 
@@ -233,25 +304,46 @@ class DzpzSession : CasSiteSession("dzpz", "电子凭证", supportsWebVpn = true
             localToken["user_id"] = it
         }
     }
+
+    /**
+     * getOSinfo 登录态下返回 `resourceid`（= loginidweaver），匿名访问时该字段缺失。
+     * 不能用 /api/ecode/sync —— 它匿名访问也返回 200 且不跳 CAS，探不出失效。
+     */
+    override suspend fun validateLogin(): Boolean = withIo {
+        val resp = client.newCall(
+            Request.Builder()
+                .url("${DzpzLogin.OS_INFO_URL}?__random__=${System.currentTimeMillis()}")
+                .header("Referer", "${DzpzLogin.BASE_URL}/wui/index.html")
+                .get().build()
+        ).execute()
+        try {
+            if (resp.code != 200) return@withIo false
+            val id = (resp.body?.string()).safeParseJsonObject()
+                .get("resourceid")?.takeIf { !it.isJsonNull }?.asString
+                ?.takeIf { it.isNotBlank() && it != "0" } ?: return@withIo false
+            localToken["user_id"] = id
+            true
+        } finally { resp.close() }
+    }
 }
 
 // ── VENUE 场馆预订 ────────────────────────────────────────────────────
 
-class VenueSession : CasSiteSession("venue", "场馆预订", supportsWebVpn = true) {
+class VenueSession : CasSiteSession("venue", "场馆预订", mustUseWebVpn = false) {
     override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
         VenueLogin(session = client, visitorId = visitorId, cachedRsaKey = cachedRsaKey)
 }
 
 // ── GMIS 研究生管理 ──────────────────────────────────────────────────
 
-class GmisSession : CasSiteSession("gmis", "研究生管理", supportsWebVpn = true) {
+class GmisSession : CasSiteSession("gmis", "研究生管理", mustUseWebVpn = true) {
     override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
         GmisLogin(session = client, visitorId = visitorId)
 }
 
 // ── GSTE 研究生评教 ──────────────────────────────────────────────────
 
-class GsteSession : CasSiteSession("gste", "研究生评教", supportsWebVpn = true) {
+class GsteSession : CasSiteSession("gste", "研究生评教", mustUseWebVpn = true) {
     override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
         GsteLogin(session = client, visitorId = visitorId)
 }
@@ -267,7 +359,7 @@ class AttendanceSession(
 ) : CasSiteSession(
     siteKey = if (isPostgraduate) "pg_attendance" else "attendance",
     siteName = if (isPostgraduate) "研究生考勤" else "本科考勤",
-    supportsWebVpn = true,
+    mustUseWebVpn = true,
 ) {
     val attendanceDomain: String
         get() = if (isPostgraduate) "yjskq.xjtu.edu.cn" else "bkkq.xjtu.edu.cn"
@@ -322,7 +414,7 @@ class AttendanceSession(
  * 校园卡会话。流程独立于标准 CAS：访问入口 → org.xjtu.edu.cn → login.xjtu.edu.cn → ticket → JWT。
  * 用 CasSiteSession 套壳——XJTULogin 状态机仍负责走完 CAS 部分，[CampusCardLogin.postLogin] 接管 ticket 兑换。
  */
-class CampusCardSession : CasSiteSession("campus_card", "校园卡", supportsWebVpn = true) {
+class CampusCardSession : CasSiteSession("campus_card", "校园卡", mustUseWebVpn = false) {
     override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
         CampusCardLogin(existingClient = client, visitorId = visitorId)
 
