@@ -61,8 +61,13 @@ class PersistentCookieJar(context: Context, prefsName: String = PREFS_NAME) : Co
         }
     }
 
-    // 防抖写盘：避免 CAS 登录链路中 5-10 次重定向每次都触发加密写入
-    private val saveHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    // 防抖写盘：避免 CAS 登录链路中 5-10 次重定向每次都触发加密写入。
+    // [性能] 必须在后台线程写：saveToDisk 会把整个 cookie 表做 AES-256 加密再落盘，
+    // 登录链路上每 500ms 触发一次。挂在主线程 Looper 上会周期性阻塞 UI 帧，
+    // 表现为"整个 App 变卡"，而与网络快慢无关。
+    private val saveHandler = android.os.Handler(
+        android.os.HandlerThread("cookie-jar-io").apply { start() }.looper
+    )
     @Volatile private var savePending = false
     private val SAVE_DEBOUNCE_MS = 500L
 

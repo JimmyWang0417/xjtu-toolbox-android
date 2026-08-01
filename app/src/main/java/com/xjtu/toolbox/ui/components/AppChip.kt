@@ -11,26 +11,46 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.squircle.squircleBorder
 import top.yukonga.miuix.kmp.squircle.squircleSurface
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.SinkFeedback
 
-/** MIUI 风格 FilterChip — 选中时柔和高亮底色（无硬边框），SinkFeedback 按压 */
+/**
+ * MIUI 风格 FilterChip —— 互斥单选用的胶囊。
+ *
+ * 视觉上对齐 miuix `TabRow` 的语言，而不是自己另造一套：
+ * - 选中态用 `tertiaryContainer` / `onTertiaryContainer` 这对语义色（浅色下是淡蓝底 + 主题蓝字，
+ *   深色下是深蓝底 + 亮蓝字），由主题保证对比度，不再用 `primary.copy(alpha)` 手工调透明度
+ *   ——后者在深色背景上会糊成一团。
+ * - 未选中态给一圈 `outline` 描边而非填色块，和 `TabRow` 的 `TabItem` 一致；这样一排胶囊在
+ *   任何背景色上都立得住，不依赖父容器恰好是 surfaceVariant。
+ * - 圆角走 squircle，尺寸与 miuix 控件同一梯度；按压用 SinkFeedback。
+ */
 @Composable
 fun AppFilterChip(
     selected: Boolean,
     onClick: () -> Unit,
     label: String,
     modifier: Modifier = Modifier,
-    leadingIcon: @Composable (() -> Unit)? = null,
-    unselectedContainerColor: Color = MiuixTheme.colorScheme.surfaceVariant
+    leadingIcon: @Composable (() -> Unit)? = null
 ) {
-    val bgColor = if (selected) MiuixTheme.colorScheme.primary.copy(alpha = 0.15f) else unselectedContainerColor
-    val textColor = if (selected) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurfaceVariantSummary
+    val bgColor = if (selected) MiuixTheme.colorScheme.tertiaryContainer else Color.Transparent
+    val textColor =
+        if (selected) MiuixTheme.colorScheme.onTertiaryContainer
+        else MiuixTheme.colorScheme.onSurfaceVariantSummary
+    val outlineColor = MiuixTheme.colorScheme.outline
+    val cornerRadius = 11.dp
 
     Box(
         modifier = modifier
-            .squircleSurface(color = bgColor, cornerRadius = 20.dp)
+            .squircleSurface(color = bgColor, cornerRadius = cornerRadius)
+            // 未选中时用描边勾轮廓，选中时靠底色，二者不叠加
+            .squircleBorder(
+                width = { if (selected) 0.dp else 1.dp },
+                color = { outlineColor },
+                cornerRadius = cornerRadius
+            )
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = SinkFeedback()
@@ -47,7 +67,7 @@ fun AppFilterChip(
             }
             Text(
                 label,
-                style = MiuixTheme.textStyles.footnote1,
+                style = MiuixTheme.textStyles.body2,
                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
                 color = textColor
             )

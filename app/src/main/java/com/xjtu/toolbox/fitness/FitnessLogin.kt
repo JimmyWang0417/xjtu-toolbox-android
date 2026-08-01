@@ -13,16 +13,24 @@ class FitnessLogin(
     cachedRsaKey: String? = null,
 ) : XJTULogin(LOGIN_URL, session, visitorId, cachedRsaKey) {
 
-    private var sessionReady = false
-    var refererUrl: String = H5_HOME_URL
-        private set
+    /**
+     * 登录落地地址，业务请求当 Referer 用。
+     *
+     * **必须是计算属性。** 超类 [XJTULogin] 的构造函数里就会调用虚方法 `postLogin()`，
+     * 那时子类的属性初始化器还没执行——写成 `var refererUrl = H5_HOME_URL` 的话，
+     * postLogin 里赋的真实回调地址会被随后的初始化器重新覆盖回 H5_HOME_URL，
+     * 于是 `localToken["referer_url"]` 永远是那个静态首页而不是真实落地页。
+     * 超类的 `finalUrl` 在超类构造期间赋值，不受子类初始化顺序影响。
+     */
+    val refererUrl: String
+        get() = finalUrl.ifBlank { H5_HOME_URL }
 
     override fun postLogin(response: Response) {
         val callbackUrl = response.request.url
-        if ("tyxylp.xjtu.edu.cn" !in callbackUrl.host) {
+        // 走 WebVPN 时 host 是 webvpn.xjtu.edu.cn、域名段被 AES 加密，明文匹配必然失败。
+        if (!com.xjtu.toolbox.util.WebVpnUtil.isAtTargetSite(callbackUrl.toString(), TARGET_HOST)) {
             throw RuntimeException("体测登录回调异常")
         }
-        refererUrl = callbackUrl.toString()
 
         // 真实链路是：xjtuLogin 先建立 PHPSESSID 并进入 H5 首页；随后前端页面
         // 在带 token/sign 的详情页里再调用 checkLogin。若回调没有这些参数，
@@ -32,7 +40,6 @@ class FitnessLogin(
         }.filterKeys { it in CHECK_LOGIN_FIELDS }
 
         if (params["token"].isNullOrBlank() || params["sign"].isNullOrBlank()) {
-            sessionReady = true
             return
         }
 
@@ -56,12 +63,16 @@ class FitnessLogin(
                 throw RuntimeException("体测会话初始化失败")
             }
         }
-        sessionReady = true
     }
 
-    override fun validateLogin(): Boolean = sessionReady
+    // 同样不能用 `private var sessionReady`：postLogin 在超类构造期间把它置 true，
+    // 随后子类初始化器又把它置回 false，validateLogin 会永远返回 false。
+    // 直接看落地地址是否已到体测站，兼容直连与 WebVPN。
+    override fun validateLogin(): Boolean =
+        com.xjtu.toolbox.util.WebVpnUtil.isAtTargetSite(finalUrl, TARGET_HOST)
 
     companion object {
+        const val TARGET_HOST = "tyxylp.xjtu.edu.cn"
         const val LOGIN_URL =
             "https://tyxylp.xjtu.edu.cn/bdlp_h5_fitness_test/public/index.php/index/login/xjtuLogin"
         const val API_ROOT =

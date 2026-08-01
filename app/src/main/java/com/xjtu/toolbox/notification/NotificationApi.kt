@@ -96,7 +96,92 @@ private const val TAG = "NotificationApi"
 private const val USER_AGENT =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-private val domainCookies = java.util.concurrent.ConcurrentHashMap<String, String>()
+/** client_id 缓存：域名 -> (client_id, 取得时刻)。服务端 Max-Age=86400，这里同样按 1 天过期。 */
+private val domainCookies = ConcurrentHashMap<String, Pair<String, Long>>()
+private const val CLIENT_ID_TTL_MS = 24 * 60 * 60 * 1000L
+
+private fun cachedClientId(domain: String): String? {
+    val (id, at) = domainCookies[domain] ?: return null
+    if (System.currentTimeMillis() - at > CLIENT_ID_TTL_MS) {
+        domainCookies.remove(domain)
+        return null
+    }
+    return id
+}
+
+/**
+ * 挑战页解析结果。
+ * [requiresHash] 为 true 表示新版页面（给 a/b/operator，需自算 answer 并附 hash）；
+ * false 表示旧版（页面直接给 answer）。
+ */
+private data class WebsiteChallenge(
+    val challengeId: String,
+    val answer: Int?,
+    val requiresHash: Boolean
+)
+
+private val CHALLENGE_ID_RE = Regex("""\b(?:var|let|const)?\s*challengeId\s*=\s*['"]([^'"]+)['"]""")
+private val CHALLENGE_ANSWER_RE = Regex("""\b(?:var|let|const)?\s*answer\s*=\s*(-?\d+)\b""")
+private val CHALLENGE_A_RE = Regex("""\b(?:var|let|const)?\s*a\s*=\s*(-?\d+)\b""")
+private val CHALLENGE_B_RE = Regex("""\b(?:var|let|const)?\s*b\s*=\s*(-?\d+)\b""")
+private val CHALLENGE_OP_RE = Regex("""\b(?:var|let|const)?\s*operator\s*=\s*['"]([+\-*])['"]""")
+
+/**
+ * 复现挑战页里的 simpleHash：`hash = ((hash << 5) - hash) + charCode`，即 hash*31+c，
+ * 每轮按 JS 位运算截断为 32 位有符号，最后取绝对值。
+ * Kotlin 的 Int 本身就是 32 位有符号，溢出行为与 JS 的 `hash & hash` 一致，直接算即可。
+ * Kotlin String 按 UTF-16 code unit 遍历，与 JS charCodeAt 语义相同。
+ */
+internal fun javascriptSimpleHash(value: String): Long {
+    var hash = 0
+    for (c in value) hash = hash * 31 + c.code
+    return kotlin.math.abs(hash.toLong())
+}
+
+/** 从挑战页 HTML 中解析挑战参数；不是挑战页则返回 null。 */
+private fun extractChallenge(html: String): WebsiteChallenge? {
+    if (html.isEmpty()) return null
+    val scripts = Jsoup.parse(html).select("script").map { it.data() }.filter { it.isNotBlank() }
+    for (script in scripts) {
+        val id = CHALLENGE_ID_RE.find(script)?.groupValues?.get(1) ?: continue
+
+        // 新版：页面给算式，自己算。只允许 + - * 三种，不执行站点返回的 JS。
+        val a = CHALLENGE_A_RE.find(script)?.groupValues?.get(1)?.toIntOrNull()
+        val b = CHALLENGE_B_RE.find(script)?.groupValues?.get(1)?.toIntOrNull()
+        val op = CHALLENGE_OP_RE.find(script)?.groupValues?.get(1)
+        if (a != null && b != null && op != null) {
+            val answer = when (op) {
+                "+" -> a + b
+                "-" -> a - b
+                else -> a * b
+            }
+            return WebsiteChallenge(id, answer, requiresHash = true)
+        }
+
+        // 旧版：answer 可能在另一个 script 标签里，所以要扫全部脚本。
+        for (candidate in scripts) {
+            val ans = CHALLENGE_ANSWER_RE.find(candidate)?.groupValues?.get(1)?.toIntOrNull()
+            if (ans != null) return WebsiteChallenge(id, ans, requiresHash = false)
+        }
+        return WebsiteChallenge(id, null, requiresHash = false)
+    }
+    return null
+}
+
+private fun buildChallengeBody(challenge: WebsiteChallenge): String {
+    val answer = challenge.answer
+    return if (challenge.requiresHash) {
+        val hash = javascriptSimpleHash("${challenge.challengeId}$answer${USER_AGENT.take(10)}")
+        """{"challenge_id":"${challenge.challengeId}","answer":$answer,""" +
+            """"browser_info":{"userAgent":"$USER_AGENT","language":"zh-CN","platform":"Win32",""" +
+            """"screen":{"width":1920,"height":1080,"colorDepth":24},""" +
+            """"timezoneOffset":-480,"hasTouchEvents":false},"hash":$hash}"""
+    } else {
+        """{"challenge_id":"${challenge.challengeId}","answer":$answer,""" +
+            """"browser_info":{"cookieEnabled":true,"deviceMemory":8,"hardwareConcurrency":4,""" +
+            """"language":"zh-CN","platform":"Win32","timezone":"Asia/Shanghai","userAgent":"$USER_AGENT"}}"""
+    }
+}
 
 /** 域名级别失败缓存：记录 DNS/连接超时失败的域名及失败时间戳，避免重复尝试 */
 private val failedDomains = ConcurrentHashMap<String, Long>()
@@ -115,83 +200,114 @@ private fun markDomainFailed(domain: String) {
     failedDomains[domain] = System.currentTimeMillis()
 }
 
-private fun fetchDocumentWithChallenge(client: OkHttpClient, url: String): Document {
-    val domain = URI(url).host
-
-    // 检查域名是否在失败缓存中
-    if (isDomainFailed(domain)) {
-        throw java.net.UnknownHostException("Domain $domain is cached as failed")
-    }
-
+/** GET 一次目标页，带上已缓存的 client_id。404/5xx 抛异常，DNS/超时标记域名失败。 */
+private fun getPage(client: OkHttpClient, url: String, domain: String): String {
     val reqBuilder = Request.Builder()
         .url(url)
         .header("User-Agent", USER_AGENT)
-    domainCookies[domain]?.let { reqBuilder.header("Cookie", it) }
+    cachedClientId(domain)?.let { reqBuilder.header("Cookie", "client_id=$it") }
 
     val response = try {
         client.newCall(reqBuilder.build()).execute()
     } catch (e: Exception) {
-        // DNS 失败或连接超时，标记域名为失败
         if (e is java.net.UnknownHostException || e is java.net.SocketTimeoutException ||
             e is java.net.ConnectException) {
             markDomainFailed(domain)
         }
         throw e
     }
-    // 非 challenge 的 4xx/5xx 直接报错
-    if (response.code == 404 || response.code >= 500) {
-        response.close()
-        throw java.io.IOException("HTTP ${response.code} for $url")
+    response.use {
+        if (it.code == 404 || it.code >= 500) {
+            throw java.io.IOException("HTTP ${it.code} for $url")
+        }
+        return it.body?.string() ?: ""
     }
-    val html = response.body?.string() ?: ""
+}
 
+/**
+ * 提交一次动态挑战，成功返回 client_id。
+ * 服务端偶发返回 `{"success":false,"message":"Invalid challenge"}`（浏览器里也会遇到，刷新即可），
+ * 所以调用方需要重试。
+ */
+private fun solveChallenge(client: OkHttpClient, url: String, challenge: WebsiteChallenge): String? {
+    val baseUri = URI(url).let { "${it.scheme}://${it.host}" }
+    val req = Request.Builder()
+        .url("$baseUri/dynamic_challenge")
+        .post(buildChallengeBody(challenge).toRequestBody("application/json; charset=utf-8".toMediaType()))
+        .header("User-Agent", USER_AGENT)
+        .header("Referer", url)
+        .header("X-Requested-With", "XMLHttpRequest")
+        .build()
+
+    val body = client.newCall(req).execute().use { resp ->
+        if (!resp.isSuccessful) {
+            Log.w(TAG, "challenge HTTP ${resp.code} for $url")
+            return null
+        }
+        resp.body?.string() ?: return null
+    }
+
+    val json = try {
+        body.safeParseJsonObject()
+    } catch (_: Exception) {
+        Log.w(TAG, "challenge response not JSON for $url")
+        return null
+    }
+    if (json.get("success")?.asBoolean != true) {
+        Log.w(TAG, "challenge rejected for $url: ${json.get("message")?.asString}")
+        return null
+    }
+    return json.get("client_id")?.asString?.takeIf { it.isNotBlank() }
+}
+
+/**
+ * 取通知列表页，必要时通过站点的人机验证。
+ *
+ * 兼容两版挑战页：旧版直接给 `answer`；新版给 `a`/`b`/`operator` 要自己算，并附 `hash`
+ * 与新结构的 `browser_info`。通过后 `client_id` 按域名缓存 1 天，后续请求直接带上。
+ */
+private fun fetchDocumentWithChallenge(client: OkHttpClient, url: String): Document {
+    val domain = URI(url).host
+
+    if (isDomainFailed(domain)) {
+        throw java.net.UnknownHostException("Domain $domain is cached as failed")
+    }
+
+    var html = getPage(client, url, domain)
     if (!html.contains("dynamic_challenge")) {
         return Jsoup.parse(html, url)
     }
 
-    val challengeId = Regex("""var\s+challengeId\s*=\s*"([^"]+)"""").find(html)
-        ?.groupValues?.get(1) ?: return Jsoup.parse(html, url)
-    val answer = Regex("""var\s+answer\s*=\s*(\d+)""").find(html)
-        ?.groupValues?.get(1) ?: return Jsoup.parse(html, url)
+    // 缓存的 client_id 已失效（否则不会再收到挑战页），清掉避免后续复用
+    domainCookies.remove(domain)
 
-    val baseUri = URI(url).let { "${it.scheme}://${it.host}" }
-    val challengeJson = """{"challenge_id":"$challengeId","answer":$answer,"browser_info":{"userAgent":"$USER_AGENT","language":"zh-CN","platform":"Win32","cookieEnabled":true,"hardwareConcurrency":4,"deviceMemory":8,"timezone":"Asia/Shanghai"}}"""
+    // 服务端偶发 Invalid challenge，重试一轮；每轮都要重新取页面，challengeId 是一次性的
+    repeat(2) { attempt ->
+        if (attempt > 0) {
+            html = getPage(client, url, domain)
+            if (!html.contains("dynamic_challenge")) return Jsoup.parse(html, url)
+        }
 
-    val challengeReq = Request.Builder()
-        .url("$baseUri/dynamic_challenge")
-        .post(challengeJson.toRequestBody("application/json; charset=utf-8".toMediaType()))
-        .header("User-Agent", USER_AGENT)
-        .build()
+        val challenge = extractChallenge(html)
+        if (challenge == null) {
+            Log.w(TAG, "challenge page not recognized for $url")
+            return Jsoup.parse(html, url)
+        }
+        if (challenge.answer == null) {
+            Log.w(TAG, "challenge has no answer for $url, page format may have changed")
+            return Jsoup.parse(html, url)
+        }
 
-    val challengeResp = client.newCall(challengeReq).execute()
-    val challengeBody = challengeResp.body?.string() ?: return Jsoup.parse(html, url)
-
-    val result = try {
-        challengeBody.safeParseJsonObject()
-    } catch (_: Exception) {
-        return Jsoup.parse(html, url)
+        val clientId = solveChallenge(client, url, challenge)
+        if (clientId != null) {
+            domainCookies[domain] = clientId to System.currentTimeMillis()
+            val retryHtml = getPage(client, url, domain)
+            return Jsoup.parse(retryHtml, url)
+        }
     }
 
-    if (result.get("success")?.asBoolean != true) {
-        return Jsoup.parse(html, url)
-    }
-
-    val clientId = result.get("client_id")?.asString ?: return Jsoup.parse(html, url)
-    domainCookies[domain] = "client_id=$clientId"
-
-    val retryReq = Request.Builder()
-        .url(url)
-        .header("Cookie", "client_id=$clientId")
-        .header("User-Agent", USER_AGENT)
-        .build()
-    val retryResp = client.newCall(retryReq).execute()
-    // 检查 HTTP 状态码：404/5xx 等直接抛出，避免解析错误页面
-    if (retryResp.code == 404 || retryResp.code >= 500) {
-        retryResp.close()
-        throw java.io.IOException("HTTP ${retryResp.code} for $url")
-    }
-    val retryHtml = retryResp.body?.string() ?: ""
-    return Jsoup.parse(retryHtml, url)
+    Log.w(TAG, "challenge failed after retry for $url")
+    return Jsoup.parse(html, url)
 }
 
 // ==================== 爬虫接口 ====================

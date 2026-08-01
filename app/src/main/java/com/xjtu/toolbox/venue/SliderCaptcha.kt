@@ -87,17 +87,37 @@ fun SliderCaptchaView(
 
     val density = LocalDensity.current
 
+    // 尺寸一律以**解码出来的位图**为准，服务端字段只在位图不可用时兜底。
+    // 服务端偶发把 backgroundImageWidth 之类的字段给成 0 或干脆不给，而下面每一处
+    // 布局尺寸都要拿 bgW 做除数——一旦为 0，displayHeightDp 会算出 Infinity.dp，
+    // 整个滑块 Box 的高度非法，组件静默渲染不出来，界面上就是"点了确认预订没弹滑块"。
+    // 这个坑此前被自动解题挡住了（自动路径压根不渲染滑块），去掉自动解题后才暴露。
+    val bgW = bgOriginalWidth.takeIf { it > 0 } ?: bgBitmap.width
+    val bgH = bgOriginalHeight.takeIf { it > 0 } ?: bgBitmap.height
+    val slW = sliderOriginalWidth.takeIf { it > 0 } ?: sliderBitmap.width
+    val slH = sliderOriginalHeight.takeIf { it > 0 } ?: sliderBitmap.height
+    Log.d(
+        TAG,
+        "dims: server=(bg $bgOriginalWidth x $bgOriginalHeight, slider $sliderOriginalWidth x $sliderOriginalHeight) " +
+            "bitmap=(bg ${bgBitmap.width} x ${bgBitmap.height}, slider ${sliderBitmap.width} x ${sliderBitmap.height}) " +
+            "used=(bg $bgW x $bgH, slider $slW x $slH)"
+    )
+    if (bgW <= 0 || bgH <= 0) {
+        Text("验证码尺寸异常", color = MiuixTheme.colorScheme.error)
+        return
+    }
+
     // 显示宽度 = 260dp（与网页端一致），高度按比例
     val displayWidthDp = 260.dp
     val displayHeightDp = with(density) {
-        (displayWidthDp.toPx() * bgOriginalHeight / bgOriginalWidth).toDp()
+        (displayWidthDp.toPx() * bgH / bgW).toDp()
     }
     val displayWidthPx = with(density) { displayWidthDp.toPx() }
 
     // 滑块显示尺寸（按相同比例缩放）
-    val scaleRatio = displayWidthPx / bgOriginalWidth
-    val sliderDisplayWidthPx = sliderOriginalWidth * scaleRatio
-    val sliderDisplayHeightPx = sliderOriginalHeight * scaleRatio
+    val scaleRatio = displayWidthPx / bgW
+    val sliderDisplayWidthPx = slW * scaleRatio
+    val sliderDisplayHeightPx = slH * scaleRatio
     val sliderDisplayWidthDp = with(density) { sliderDisplayWidthPx.toDp() }
 
     // 最大滑动距离
@@ -105,7 +125,7 @@ fun SliderCaptchaView(
 
     // 服务器期望的显示坐标系参数 (260-based, 与网页 CSS px 一致)
     val serverBgWidth = 260
-    val serverSliderHeight = (sliderOriginalHeight * 260.0 / bgOriginalWidth).roundToInt()
+    val serverSliderHeight = (slH * 260.0 / bgW).roundToInt()
 
     // 滑动状态
     var offsetX by remember { mutableFloatStateOf(0f) }
@@ -265,133 +285,4 @@ private fun decodeBase64Image(dataUri: String): android.graphics.Bitmap? {
         Log.e(TAG, "Failed to decode image", e)
         null
     }
-}
-
-/**
- * 自动解题：Alpha 轮廓 + 背景边缘匹配算法
- * 1. 提取滑块的 alpha 轮廓（不透明↔透明的边界像素 = 拼图形状）
- * 2. 对背景图做 Sobel 边缘检测（缺口边界产生强边缘）
- * 3. 横向滑动 alpha 轮廓模板，找背景边缘响应最大的位置
- *
- * @return 目标 x 坐标（260 显示坐标系），null 表示无法自动解题
- */
-fun autoSolveCaptcha(
-    backgroundImageBase64: String,
-    sliderImageBase64: String,
-    bgOriginalWidth: Int,
-    bgOriginalHeight: Int
-): Int? {
-    return try {
-        val bgBmp = decodeBase64Image(backgroundImageBase64) ?: return null
-        val slBmp = decodeBase64Image(sliderImageBase64) ?: return null
-
-        val bw = bgBmp.width
-        val bh = bgBmp.height
-        val sw = slBmp.width
-        val sh = slBmp.height
-
-        // ── 1. 背景灰度化 ──
-        val bgGray = IntArray(bw * bh)
-        for (y in 0 until bh) for (x in 0 until bw) {
-            val p = bgBmp.getPixel(x, y)
-            bgGray[y * bw + x] = (p shr 16 and 0xFF) * 77 + (p shr 8 and 0xFF) * 150 + (p and 0xFF) * 29 shr 8
-        }
-
-        // ── 2. 提取滑块不透明度 ──
-        val slOpaque = BooleanArray(sw * sh)
-        for (y in 0 until sh) for (x in 0 until sw) {
-            slOpaque[y * sw + x] = (slBmp.getPixel(x, y) ushr 24) > 128
-        }
-
-        // ── 3. Sobel 边缘检测（背景） ──
-        val bgEdge = IntArray(bw * bh)
-        for (y in 1 until bh - 1) for (x in 1 until bw - 1) {
-            val gx = -bgGray[(y - 1) * bw + x - 1] + bgGray[(y - 1) * bw + x + 1] -
-                2 * bgGray[y * bw + x - 1] + 2 * bgGray[y * bw + x + 1] -
-                bgGray[(y + 1) * bw + x - 1] + bgGray[(y + 1) * bw + x + 1]
-            val gy = -bgGray[(y - 1) * bw + x - 1] + bgGray[(y + 1) * bw + x - 1] -
-                2 * bgGray[(y - 1) * bw + x] + 2 * bgGray[(y + 1) * bw + x] -
-                bgGray[(y - 1) * bw + x + 1] + bgGray[(y + 1) * bw + x + 1]
-            bgEdge[y * bw + x] = kotlin.math.abs(gx) + kotlin.math.abs(gy)
-        }
-
-        // ── 4. 提取滑块 Alpha 轮廓（形状边界） ──
-        // 不透明像素且 4-邻域至少有一个透明像素 → 形状边界点
-        data class ContourPoint(val sx: Int, val sy: Int)
-        val contourPoints = mutableListOf<ContourPoint>()
-
-        for (y in 1 until sh - 1) for (x in 1 until sw - 1) {
-            if (!slOpaque[y * sw + x]) continue
-            val hasTransparentNeighbor =
-                !slOpaque[(y - 1) * sw + x] ||
-                !slOpaque[(y + 1) * sw + x] ||
-                !slOpaque[y * sw + (x - 1)] ||
-                !slOpaque[y * sw + (x + 1)]
-            if (hasTransparentNeighbor) {
-                contourPoints.add(ContourPoint(x, y))
-            }
-        }
-
-        if (contourPoints.isEmpty()) {
-            Log.w(TAG, "autoSolve: no contour points in slider")
-            return null
-        }
-
-        // ── 5. 模板匹配：Alpha 轮廓 × 背景边缘 ──
-        // 缺口不会在最左侧（约 15%）
-        val searchStart = (bw * 0.15).toInt()
-        val searchEnd = bw - sw
-        var bestX = searchStart
-        var bestScore = -1.0
-
-        for (x in searchStart..searchEnd) {
-            var score = 0L
-            for (cp in contourPoints) {
-                val bx = x + cp.sx
-                val by = cp.sy
-                if (bx in 0 until bw && by in 0 until bh) {
-                    score += bgEdge[by * bw + bx]
-                }
-            }
-            val norm = score.toDouble() / contourPoints.size
-            if (norm > bestScore) {
-                bestScore = norm
-                bestX = x
-            }
-        }
-
-        // 转换到 260 显示坐标系
-        val displayX = (bestX * 260.0 / bgOriginalWidth).roundToInt()
-        Log.d(TAG, "autoSolve: bestX=$bestX (orig), displayX=$displayX, score=${bestScore.toInt()}, contourPoints=${contourPoints.size}")
-        displayX
-    } catch (e: Exception) {
-        Log.e(TAG, "autoSolve failed", e)
-        null
-    }
-}
-
-/**
- * 生成模拟人类滑动轨迹（自动解题时用）
- * @param targetX 目标 x 坐标（显示坐标系）
- * @param duration 总滑动时间 (ms)
- */
-fun generateHumanLikeTrack(targetX: Int, duration: Long = 1200L): List<TrackPoint> {
-    val baseT = (800L..1500L).random()
-    val points = mutableListOf<TrackPoint>()
-    points.add(TrackPoint(0, 0, "down", baseT))
-
-    val steps = (duration / 16).toInt()  // ~60fps
-    var t = baseT + (100L..200L).random()
-    for (i in 1..steps) {
-        val progress = i.toFloat() / steps
-        // 缓动函数：先快后慢 (easeOutCubic)
-        val eased = 1 - (1 - progress) * (1 - progress) * (1 - progress)
-        val x = (targetX * eased).roundToInt()
-        val y = (-2..2).random()  // 微小 y 轴抖动
-        points.add(TrackPoint(x, y, "move", t))
-        t += (12L..20L).random()
-    }
-
-    points.add(TrackPoint(targetX, (-3..0).random(), "up", t + (200L..500L).random()))
-    return points
 }

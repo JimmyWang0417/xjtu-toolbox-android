@@ -2,9 +2,7 @@ package com.xjtu.toolbox.venue
 
 import android.util.Log
 import com.google.gson.Gson
-import com.google.gson.JsonArray
 import com.google.gson.JsonObject
-import com.google.gson.annotations.SerializedName
 import com.xjtu.toolbox.auth.AuthExpiredException
 import com.xjtu.toolbox.auth.SiteSession
 import com.xjtu.toolbox.auth.XJTULogin
@@ -12,26 +10,58 @@ import kotlinx.coroutines.runBlocking
 import okhttp3.FormBody
 import okhttp3.Request
 import org.jsoup.Jsoup
-import java.net.URLEncoder
 
 /**
  * 体育场馆预订 API
  *
- * 基于 http://202.117.17.144 的 HTML + JSON 混合接口
+ * 基于 http://202.117.17.144 的 HTML + JSON 混合接口（无独立 8071 端口——见下方说明）。
+ *
+ * 真实预订流程（按抓包 HAR 核实，2026-07-31）：
+ * 1. `product/findtime.html?s_dates=日期&serviceid=场馆ID` → 该场馆当天全部时间段
+ *    （TIME_NO），含库存 ID（stockid，即下方 stockId）、总量/已用/剩余。
+ * 2. 若该时段库存 `surplus > 0`，再查 `seat/seat.html?id=场馆ID&stockid=库存ID`
+ *    → 该库存下的具体场地（若场馆无需选场地，接口无场地明细，退化为整段一个单元）。
+ *    场地明细取自返回 HTML 里 `#txt_seatid` 隐藏字段，格式
+ *    `场地序号_场地明细ID_容量,场地序号_场地明细ID_容量,...`。
+ * 3. 提交预订前先 POST `order/show.html?id=场馆ID`（body 只有 `param` 字段，
+ *    JSON：`{"stock":{库存ID:数量},"address":"场馆ID","stockdetailids":"明细ID,...","extend":{}}`），
+ *    服务端会返回一份自己校验/补全过的 `_param`（嵌在返回 HTML 的
+ *    `<script>var _param=eval({...});var _booked=eval(0);...</script>` 里）。
+ *    **提交订单必须原样带着这份服务端生成的 `_param`，不能自己重新拼**——自拼的
+ *    参数字段和服务端期望的不完全一致，会被拒绝。
+ * 4. 拿滑动验证码 `GET /gen`；用户滑动完成后拼接
+ *    `yzm = <轨迹JSON>synjones<验证码ID>synjoneshttp://202.117.17.144:8071`
+ *    ——这段 `:8071` 是服务器滑块页面 JS 里固定写死、用于服务端校验的文本，
+ *    不是真实访问端口，必须原样保留在这个字符串里。
+ * 5. `POST /order/book.html`（真实终点，通过页面 `cu()` 函数拼接 contextPath +
+ *    url + ".html" 得出，客户端 JS 字面量写的是 `/order/book` 容易误判为无后缀），
+ *    body：`param=<步骤3拿到的_param>&yzm=<步骤4拼接串>&json=true`。
+ *
+ * 历史教训：早期实现假设了两个从未在真实站点出现过的接口
+ * （`findOkArea.html`/`findLockArea.html`），且把 `BASE_URL` 错误地设成
+ * `http://202.117.17.144:8071`——抓包证实全站请求都走默认 80 端口，`:8071`
+ * 只在上面第 4 步的 `yzm` 拼接串里作为固定文本出现。
  */
 class VenueApi(private val site: SiteSession) {
 
     companion object {
         private const val TAG = "VenueApi"
-        private const val BASE = "http://202.117.17.144:8071"
+        private const val BASE = "http://202.117.17.144"
         private val gson = Gson()
+
+        // order/show.html 返回页面里嵌入的 `var _param=eval({...});var _booked=eval`
+        // ——用非贪婪到下一条已知语句的方式截取，避免手动数花括号出错。
+        private val PARAM_REGEX = Regex("""var _param=eval\((\{.*)\);var _booked=eval""")
     }
 
-    private fun request(url: String): Request.Builder =
+    private fun request(url: String, referer: String = "$BASE/product/index.html"): Request.Builder =
         Request.Builder()
             .url(url)
-            .header("Referer", BASE)
+            .header("Referer", referer)
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/131.0 Mobile Safari/537.36")
+
+    private fun ajaxRequest(url: String, referer: String): Request.Builder =
+        request(url, referer).header("X-Requested-With", "XMLHttpRequest")
 
     private fun execute(builder: Request.Builder) =
         runBlocking { site.executeWithReAuth(builder.build()) }
@@ -46,20 +76,20 @@ class VenueApi(private val site: SiteSession) {
         val iconType: String? = null    // icon-badminton, icon-tennis, ...
     )
 
-    /** 场地 + 时段（从 findOkArea JSON） */
+    /** 一个时段下的一个可选场地单元（从 findtime.html + seat/seat.html 合并得出） */
     data class AreaSlot(
-        val areaId: Long,          // stockdetailids (e.g. 4099045)
-        val areaName: String,       // 场地1, 场地2...
-        val stockId: Long,          // 用于 stock 参数 (e.g. 428121)
-        val timeSlot: String,       // 18:00-19:00
+        val areaDetailId: Long,   // 场地明细ID，提交订单 stockdetailids 用；无细分场地时退化为 stockId
+        val areaName: String,     // "场地1"/"场地2"/...；无细分场地时为 "预订"；已满时为 "已满"
+        val stockId: Long,        // 库存ID，提交订单 stock map 的 key，同一时段下所有场地共享
+        val timeSlot: String,     // 18:00-19:00
         val price: Double,
-        val date: String,           // 2026-03-03
-        val status: Int,            // 1=可预订
-        val allCount: Int,
-        val usingNum: Int,
+        val date: String,         // 2026-03-03
+        val allCount: Int,        // 该时段总容量（时段级，非逐场地）
+        val usingNum: Int,        // 已用（时段级）
+        val surplus: Int,         // 剩余（时段级）——服务端只在这个粒度给出占用数据
         val serviceid: String
     ) {
-        val isAvailable: Boolean get() = status == 1
+        val isAvailable: Boolean get() = surplus > 0
     }
 
     /** 验证码数据 */
@@ -73,12 +103,26 @@ class VenueApi(private val site: SiteSession) {
         val sliderHeight: Int
     )
 
+    /** 服务端在 order/show.html 步骤生成的待提交订单参数（必须原样带回，不能自拼） */
+    data class PendingOrder(private val paramJson: String) {
+        internal fun rawParamJson(): String = paramJson
+    }
+
     /** 预订结果 */
     data class BookingResult(
         val success: Boolean,
         val orderId: String? = null,
         val price: Double = 0.0,
         val message: String = ""
+    )
+
+    private data class TimeSlotInfo(
+        val timeNo: String,
+        val stockId: Long,
+        val price: Double,
+        val allCount: Int,
+        val usingNum: Int,
+        val surplus: Int
     )
 
     // ─── API 方法 ─────────────────────────────────────────
@@ -125,35 +169,149 @@ class VenueApi(private val site: SiteSession) {
     }
 
     /**
-     * 获取指定场馆某日的可预约场地/时段
+     * 获取指定场馆某日的可预约场地/时段。
+     *
+     * 两级查询：先 findtime.html 拿时段+库存量，再对每个「有剩余」的时段查
+     * seat/seat.html 拿具体场地明细。已满的时段不再查场地明细（服务端也查不出
+     * 有意义的数据），直接标记为不可选。
      */
     fun fetchAvailableSlots(serviceid: Int, date: String): List<AreaSlot> {
-        val url = "$BASE/product/findOkArea.html?s_date=$date&serviceid=$serviceid&_=${System.currentTimeMillis()}"
-        val response = execute(request(url))
+        val showReferer = "$BASE/product/show.html?id=$serviceid"
+        val timeSlots = fetchTimeSlots(serviceid, date, showReferer)
+        val result = mutableListOf<AreaSlot>()
+        for (ts in timeSlots) {
+            if (ts.surplus <= 0) {
+                result.add(
+                    AreaSlot(
+                        areaDetailId = ts.stockId,
+                        areaName = "已满",
+                        stockId = ts.stockId,
+                        timeSlot = ts.timeNo,
+                        price = ts.price,
+                        date = date,
+                        allCount = ts.allCount,
+                        usingNum = ts.usingNum,
+                        surplus = ts.surplus,
+                        serviceid = serviceid.toString()
+                    )
+                )
+                continue
+            }
+            val areas = fetchSeatAreas(serviceid, ts.stockId, showReferer)
+            if (areas.isEmpty()) {
+                // 场馆本身不需要选具体场地：整段作为单一预订单元
+                result.add(
+                    AreaSlot(
+                        areaDetailId = ts.stockId,
+                        areaName = "预订",
+                        stockId = ts.stockId,
+                        timeSlot = ts.timeNo,
+                        price = ts.price,
+                        date = date,
+                        allCount = ts.allCount,
+                        usingNum = ts.usingNum,
+                        surplus = ts.surplus,
+                        serviceid = serviceid.toString()
+                    )
+                )
+            } else {
+                areas.forEach { (detailId, name) ->
+                    result.add(
+                        AreaSlot(
+                            areaDetailId = detailId,
+                            areaName = name,
+                            stockId = ts.stockId,
+                            timeSlot = ts.timeNo,
+                            price = ts.price,
+                            date = date,
+                            allCount = ts.allCount,
+                            usingNum = ts.usingNum,
+                            surplus = ts.surplus,
+                            serviceid = serviceid.toString()
+                        )
+                    )
+                }
+            }
+        }
+        return result
+    }
+
+    private fun fetchTimeSlots(serviceid: Int, date: String, referer: String): List<TimeSlotInfo> {
+        val url = "$BASE/product/findtime.html?type=day&s_dates=$date&serviceid=$serviceid&_=${System.currentTimeMillis()}"
+        val response = execute(ajaxRequest(url, referer))
         val body = response.body?.string() ?: return emptyList()
         response.close()
+        if (XJTULogin.isAuthFailureResponse(body)) throw AuthExpiredException("体育场馆")
 
-        return parseAreaSlots(body, date, serviceid.toString())
+        return try {
+            val json = gson.fromJson(body, JsonObject::class.java)
+            // 该场馆当天无任何时段时，"object" 字段值是 JSON null（不是字段缺失），
+            // getAsJsonArray 会直接把 JsonNull 强转 JsonArray 抛 ClassCastException，
+            // 必须先判断 isJsonNull 再取 JsonArray，不能只靠 get() 返回 Kotlin null 兜底。
+            val objectEl = json.get("object")
+            if (objectEl == null || objectEl.isJsonNull) return emptyList()
+            val arr = objectEl.asJsonArray
+            arr.mapNotNull { el ->
+                val obj = el.asJsonObject
+                val timeNo = obj.get("TIME_NO")?.asString ?: return@mapNotNull null
+                val stockId = obj.get("ID")?.asLong ?: return@mapNotNull null
+                val price = obj.get("PRICE")?.asString?.toDoubleOrNull() ?: 0.0
+                val allCount = obj.get("ALL_COUNT")?.asInt ?: 0
+                val usingNum = obj.get("USING_NUM")?.asInt ?: 0
+                val surplus = obj.get("SURPLUS")?.asInt ?: (allCount - usingNum).coerceAtLeast(0)
+                TimeSlotInfo(timeNo, stockId, price, allCount, usingNum, surplus)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "fetchTimeSlots parse error", e)
+            emptyList()
+        }
     }
 
     /**
-     * 获取已锁定（不可预约）的场地/时段
+     * 查询某个库存（时段实例）下的具体场地明细。
+     * 返回 (场地明细ID, 场地名) 列表；场馆不需要选场地时返回空列表。
      */
-    fun fetchLockedSlots(serviceid: Int, date: String): List<AreaSlot> {
-        val url = "$BASE/product/findLockArea.html?s_date=$date&serviceid=$serviceid&_=${System.currentTimeMillis()}"
-        val response = execute(request(url))
-        val body = response.body?.string() ?: return emptyList()
+    private fun fetchSeatAreas(serviceid: Int, stockId: Long, referer: String): List<Pair<Long, String>> {
+        val url = "$BASE/seat/seat.html?id=$serviceid&type=2&stockid=$stockId&json=html&_=${System.currentTimeMillis()}"
+        val response = execute(ajaxRequest(url, referer))
+        val html = response.body?.string() ?: return emptyList()
         response.close()
 
-        return parseAreaSlots(body, date, serviceid.toString())
+        return try {
+            val doc = Jsoup.parse(html, BASE)
+            // <input type="hidden" value="1_4286121_1,2_4286122_2," id="txt_seatid" />
+            // 格式：场地序号_场地明细ID_容量，逐个逗号分隔
+            val seatIdRaw = doc.selectFirst("#txt_seatid")?.attr("value").orEmpty()
+            if (seatIdRaw.isBlank()) return emptyList()
+
+            // <span class="cell football" title="场地1" data="1" id="seat_1" rel="2">
+            val nameByIndex = doc.select("span.cell").mapNotNull { span ->
+                val idx = span.attr("data").toIntOrNull() ?: return@mapNotNull null
+                val title = span.attr("title").ifBlank { "场地$idx" }
+                idx to title
+            }.toMap()
+
+            seatIdRaw.split(",")
+                .mapNotNull { it.trim().takeIf { s -> s.isNotEmpty() } }
+                .mapNotNull { entry ->
+                    val parts = entry.split("_")
+                    if (parts.size < 2) return@mapNotNull null
+                    val idx = parts[0].toIntOrNull() ?: return@mapNotNull null
+                    val detailId = parts[1].toLongOrNull() ?: return@mapNotNull null
+                    detailId to (nameByIndex[idx] ?: "场地$idx")
+                }
+        } catch (e: Exception) {
+            Log.e(TAG, "fetchSeatAreas parse error", e)
+            emptyList()
+        }
     }
 
     /**
      * 生成滑动验证码
      */
-    fun generateCaptcha(): CaptchaData {
-        val url = "$BASE/gen"
-        val response = execute(request(url))
+    fun generateCaptcha(serviceid: Int): CaptchaData {
+        val referer = "$BASE/order/show.html?id=$serviceid"
+        val response = execute(ajaxRequest("$BASE/gen", referer))
         val body = response.body?.string() ?: throw RuntimeException("获取验证码失败")
         response.close()
 
@@ -171,69 +329,79 @@ class VenueApi(private val site: SiteSession) {
     }
 
     /**
-     * 提交预订
+     * 预订第一步：把选中的场地+时段提交给服务端，换回一份服务端校验/补全过的
+     * `_param`。这份 `_param` 必须原样带到 [submitBooking]，不能自己重新构造
+     * ——自拼字段和服务端期望的结构不完全一致，会被服务端拒绝。
      *
      * @param serviceid 场馆 ID
-     * @param selections 选中的 AreaSlot 列表
-     * @param captchaId 验证码 ID (from generateCaptcha)
+     * @param selections 选中的 AreaSlot 列表（可跨多个时段/库存）
+     */
+    fun prepareOrder(serviceid: Int, selections: List<AreaSlot>): PendingOrder {
+        require(selections.isNotEmpty()) { "请先选择时段" }
+
+        // 同一库存(stockId)下选中的场地数量即为该库存的预订份数
+        val stockCounts = LinkedHashMap<Long, Int>()
+        selections.forEach { stockCounts[it.stockId] = (stockCounts[it.stockId] ?: 0) + 1 }
+        val stockDetailIds = selections.map { it.areaDetailId.toString() }.distinct()
+
+        val param = JsonObject().apply {
+            add(
+                "stock",
+                JsonObject().apply { stockCounts.forEach { (id, count) -> addProperty(id.toString(), count.toString()) } }
+            )
+            addProperty("address", serviceid.toString())
+            addProperty("stockdetailids", stockDetailIds.joinToString(","))
+            add("extend", JsonObject())
+        }
+
+        val formBody = FormBody.Builder()
+            .add("param", gson.toJson(param))
+            .build()
+
+        val referer = "$BASE/product/show.html?id=$serviceid"
+        val response = execute(request("$BASE/order/show.html?id=$serviceid", referer).post(formBody))
+        val html = response.body?.string() ?: throw RuntimeException("获取订单确认信息失败")
+        response.close()
+
+        if (XJTULogin.isAuthFailureResponse(html)) throw AuthExpiredException("体育场馆")
+
+        val match = PARAM_REGEX.find(html)
+            ?: run {
+                Log.w(TAG, "prepareOrder: _param not found, body preview=${html.take(300)}")
+                throw RuntimeException("该时段可能已被预订或下架，请重新选择")
+            }
+        return PendingOrder(match.groupValues[1])
+    }
+
+    /**
+     * 预订第二步：带着 [prepareOrder] 拿到的服务端 `_param` + 滑块验证码结果提交订单。
+     *
+     * @param serviceid 场馆 ID（用于拼接 Referer，不参与提交参数本身）
+     * @param pendingOrder [prepareOrder] 返回的服务端参数
+     * @param captchaId 验证码 ID（from [generateCaptcha]）
      * @param sliderTrackJson 滑动轨迹 JSON 字符串
      */
     fun submitBooking(
         serviceid: Int,
-        selections: List<AreaSlot>,
+        pendingOrder: PendingOrder,
         captchaId: String,
         sliderTrackJson: String
     ): BookingResult {
-        // 构造 stock 和 stockdetail 映射
-        val stockMap = JsonObject()
-        val stockDetailMap = JsonObject()
-        val stockDetailIds = mutableListOf<String>()
-
-        for (slot in selections) {
-            stockMap.addProperty(slot.stockId.toString(), "1")
-            stockDetailMap.addProperty(slot.stockId.toString(), slot.areaId.toString())
-            stockDetailIds.add(slot.areaId.toString())
-        }
-
-        val param = JsonObject().apply {
-            addProperty("activityPrice", 0)
-            add("activityStr", null)
-            addProperty("address", serviceid.toString())
-            add("dates", null)
-            add("extend", null)
-            addProperty("flag", "0")
-            add("isBulkBooking", null)
-            addProperty("isbookall", "0")
-            addProperty("isfreeman", "0")
-            addProperty("istimes", "1")
-            add("mercacc", null)
-            add("merccode", null)
-            add("order", null)
-            add("orderfrom", null)
-            add("remark", null)
-            add("serviceid", null)
-            addProperty("shoppingcart", "0")
-            add("sno", null)
-            add("stock", stockMap)
-            add("stockdetail", stockDetailMap)
-            addProperty("stockdetailids", stockDetailIds.joinToString(","))
-            add("stockid", null)
-            addProperty("subscriber", "0")
-            add("time_detailnames", null)
-            add("userBean", null)
-            add("venueReason", null)
-        }
-
-        // 构造 yzm: {trackJson}synjones{captchaId}synjoneshttp://202.117.17.144:8071
+        // 服务端滑块页面固定拼接格式：{轨迹JSON}synjones{验证码ID}synjones{固定文本}
+        // 这段固定文本本身写的是 8071 端口，是服务端用来做签名校验的常量，
+        // 不是真实访问端口，必须原样带上，不能因为「端口是错的」而删掉。
         val yzm = "${sliderTrackJson}synjones${captchaId}synjoneshttp://202.117.17.144:8071"
 
         val formBody = FormBody.Builder()
-            .add("param", gson.toJson(param))
+            .add("param", pendingOrder.rawParamJson())
             .add("yzm", yzm)
             .add("json", "true")
             .build()
 
-        val response = execute(request("$BASE/order/book.html").post(formBody))
+        val referer = "$BASE/order/show.html?id=$serviceid"
+        // 真实终点是 order/book.html——页面 JS 用 cu(url) 给 "/order/book" 拼上
+        // contextPath + ".html" 后缀，字面量容易被误读成没有后缀。
+        val response = execute(ajaxRequest("$BASE/order/book.html", referer).post(formBody))
         val responseBody = response.body?.string() ?: "{}"
         response.close()
 
@@ -245,11 +413,22 @@ class VenueApi(private val site: SiteSession) {
             val message = json.get("message")?.asString ?: ""
             val objElem = json.get("object")
             val obj = if (objElem != null && objElem.isJsonObject) objElem.asJsonObject else null
+            val orderId = obj?.get("orderid")?.takeIf { !it.isJsonNull }?.asString
 
-            if (result == "2" || obj?.has("orderid") == true) {
-                val orderId = obj?.get("orderid")?.asString ?: ""
-                val price = obj?.get("price")?.asDouble ?: 0.0
-                BookingResult(true, orderId, price, message.ifEmpty { "预订成功，请尽快前往「移动交通大学」App 完成支付" })
+            // shopping.js 里 result=="1" 直接完成（免支付/已扣款），result=="2"
+            // 需要跳转支付页——两种都算「预订成功」，只是后续动作不同。
+            if ((result == "1" || result == "2") && !orderId.isNullOrBlank()) {
+                val price = obj?.get("price")?.takeIf { !it.isJsonNull }?.asDouble ?: 0.0
+                val needsPay = result == "2"
+                BookingResult(
+                    success = true,
+                    orderId = orderId,
+                    price = price,
+                    message = message.ifEmpty {
+                        if (needsPay) "预订成功，请尽快前往「移动交通大学」App 完成支付"
+                        else "预订成功"
+                    }
+                )
             } else {
                 BookingResult(false, message = message.ifEmpty { "预订失败：${responseBody.take(200)}" })
             }
@@ -257,47 +436,5 @@ class VenueApi(private val site: SiteSession) {
             Log.e(TAG, "submitBooking: parse error", e)
             BookingResult(false, message = "预订失败: ${e.message}")
         }
-    }
-
-    // ─── 内部辅助 ─────────────────────────────────────────
-
-    private fun parseAreaSlots(jsonStr: String, date: String, serviceid: String): List<AreaSlot> {
-        val result = mutableListOf<AreaSlot>()
-        try {
-            val json = gson.fromJson(jsonStr, JsonObject::class.java)
-            val arr = json.getAsJsonArray("object") ?: return emptyList()
-
-            for (element in arr) {
-                val obj = element.asJsonObject
-                val areaId = obj.get("id")?.asLong ?: continue
-                val areaName = obj.get("sname")?.asString ?: "场地"
-                val stockId = obj.get("stockid")?.asLong ?: continue
-                val stock = obj.getAsJsonObject("stock") ?: continue
-
-                val timeNo = stock.get("time_no")?.asString ?: continue
-                val price = stock.get("price")?.asDouble ?: 0.0
-                val status = stock.get("status")?.asInt ?: 0
-                val allCount = stock.get("all_count")?.asInt ?: 0
-                val usingNum = stock.get("using_num")?.asInt ?: 0
-
-                result.add(
-                    AreaSlot(
-                        areaId = areaId,
-                        areaName = areaName,
-                        stockId = stockId,
-                        timeSlot = timeNo,
-                        price = price,
-                        date = date,
-                        status = status,
-                        allCount = allCount,
-                        usingNum = usingNum,
-                        serviceid = serviceid
-                    )
-                )
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "parseAreaSlots error", e)
-        }
-        return result
     }
 }

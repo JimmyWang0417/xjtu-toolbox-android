@@ -203,7 +203,7 @@ class CredentialStore(context: Context) {
         set(value) { appPrefs.edit().putBoolean(KEY_AUTO_CHECK_UPDATE, value).apply() }
 
     var updateChannel: String
-        get() = AppUpdater.normalizeChannel(appPrefs.getString(KEY_UPDATE_CHANNEL, CHANNEL_GITEE_STABLE))
+        get() = AppUpdater.normalizeChannel(appPrefs.getString(KEY_UPDATE_CHANNEL, CHANNEL_GITEE))
         set(value) { appPrefs.edit().putString(KEY_UPDATE_CHANNEL, AppUpdater.normalizeChannel(value)).apply() }
 
     var accountType: AccountType
@@ -218,9 +218,26 @@ class CredentialStore(context: Context) {
         get() = appPrefs.getString(KEY_HOME_THEME, THEME_CARD) ?: THEME_CARD
         set(value) { appPrefs.edit().putString(KEY_HOME_THEME, value).apply() }
 
-    var pinnedServices: Set<String>
-        get() = appPrefs.getStringSet(KEY_PINNED, emptySet()) ?: emptySet()
-        set(value) { appPrefs.edit().putStringSet(KEY_PINNED, value).apply() }
+    /**
+     * 最近打开过的子系统 siteKey（最新在前，最多 [MAX_RECENT_SITES] 个）。
+     * 冷启动后据此做免密 SSO 预热——用户大概率还会进这几个。
+     */
+    var recentSiteKeys: List<String>
+        get() = appPrefs.getString(KEY_RECENT_SITES, null)
+            ?.split(',')?.filter { it.isNotBlank() } ?: emptyList()
+        set(value) {
+            appPrefs.edit()
+                .putString(KEY_RECENT_SITES, value.take(MAX_RECENT_SITES).joinToString(","))
+                .apply()
+        }
+
+    /** 记录一次打开：置顶去重后截断。 */
+    fun recordRecentSite(siteKey: String) {
+        if (siteKey.isBlank()) return
+        val cur = recentSiteKeys
+        if (cur.firstOrNull() == siteKey) return
+        recentSiteKeys = (listOf(siteKey) + cur.filter { it != siteKey })
+    }
 
     var showQuickActions: Boolean
         get() = appPrefs.getBoolean(KEY_SHOW_QUICK_ACTIONS, true)
@@ -253,7 +270,8 @@ class CredentialStore(context: Context) {
         private const val KEY_ACCOUNT_TYPE = "account_type"
         private const val KEY_EMPTY_ROOM_CDN_TIP = "empty_room_cdn_tip"
         private const val KEY_HOME_THEME = "home_theme"
-        private const val KEY_PINNED = "pinned_services"
+        private const val KEY_RECENT_SITES = "recent_site_keys"
+        private const val MAX_RECENT_SITES = 4
         private const val KEY_SHOW_QUICK_ACTIONS = "show_quick_actions"
 
         // ── 设置值常量 ──
@@ -271,12 +289,8 @@ class CredentialStore(context: Context) {
         const val NETWORK_AUTO = "auto"
         const val NETWORK_DIRECT = "direct"
         const val NETWORK_VPN = "vpn"
-        const val CHANNEL_GITEE_STABLE = AppUpdater.CHANNEL_GITEE_STABLE
-        const val CHANNEL_GITEE_LATEST = AppUpdater.CHANNEL_GITEE_LATEST
-        const val CHANNEL_GITHUB_STABLE = AppUpdater.CHANNEL_GITHUB_STABLE
-        const val CHANNEL_GITHUB_LATEST = AppUpdater.CHANNEL_GITHUB_LATEST
-        const val CHANNEL_STABLE = CHANNEL_GITEE_STABLE
-        const val CHANNEL_BETA = CHANNEL_GITEE_LATEST
+        const val CHANNEL_GITEE = AppUpdater.CHANNEL_GITEE
+        const val CHANNEL_GITHUB = AppUpdater.CHANNEL_GITHUB
     }
 }
 

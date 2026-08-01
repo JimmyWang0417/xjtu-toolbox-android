@@ -18,6 +18,7 @@ import top.yukonga.miuix.kmp.utils.overScrollVertical
 
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.animation.animateContentSize
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -47,6 +48,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.xjtu.toolbox.auth.SiteSession
+import com.xjtu.toolbox.ui.components.AppCardColor
 import com.xjtu.toolbox.ui.components.ErrorState
 import com.xjtu.toolbox.ui.components.LoadingState
 import kotlinx.coroutines.Dispatchers
@@ -185,47 +187,40 @@ fun ScoreReportScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                     contentPadding = PaddingValues(vertical = 8.dp)
                 ) {
-                    // 提醒卡片
+                    // GPA 概览：三个数字是这页的主角，放在最上面
                     item {
                         top.yukonga.miuix.kmp.basic.Card(
                             modifier = Modifier.fillMaxWidth(),
-                            colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surfaceVariant)
+                            colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(color = AppCardColor)
                         ) {
-                            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.Warning, contentDescription = null, tint = MiuixTheme.colorScheme.primaryVariant)
-                                Spacer(Modifier.width(12.dp))
-                                Column {
-                                    Text("绕过评教查成绩", style = MiuixTheme.textStyles.body1, fontWeight = FontWeight.Bold, color = MiuixTheme.colorScheme.onSurface)
-                                    Text("此功能通过帆软报表接口获取成绩，可在未评教时查看", style = MiuixTheme.textStyles.footnote1, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                            Column(Modifier.padding(vertical = 18.dp)) {
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                                    ScoreStat("%.2f".format(weightedGpa), "加权 GPA", MiuixTheme.colorScheme.primary)
+                                    ScoreStat("${allGrades.size}", "课程数", MiuixTheme.colorScheme.onSurface)
+                                    ScoreStat("%.1f".format(totalCredits), "总学分", MiuixTheme.colorScheme.onSurface)
                                 }
                             }
                         }
                     }
 
-                    // GPA 概览
+                    // 说明文字改成一行脚注：它是一次性说明，不值得占一张和数据卡同等重量的卡片
                     item {
-                        top.yukonga.miuix.kmp.basic.Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surfaceVariant)
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column(Modifier.padding(20.dp)) {
-                                Text("成绩概览", style = MiuixTheme.textStyles.title4, fontWeight = FontWeight.Bold, color = MiuixTheme.colorScheme.onSurface)
-                                Spacer(Modifier.height(16.dp))
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                        Text("%.2f".format(weightedGpa), style = MiuixTheme.textStyles.title3, fontWeight = FontWeight.Bold, color = MiuixTheme.colorScheme.onSurface)
-                                        Text("加权 GPA", style = MiuixTheme.textStyles.footnote1, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-                                    }
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                        Text("${allGrades.size}", style = MiuixTheme.textStyles.title3, fontWeight = FontWeight.Bold, color = MiuixTheme.colorScheme.onSurface)
-                                        Text("课程数", style = MiuixTheme.textStyles.footnote1, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-                                    }
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                        Text("%.1f".format(totalCredits), style = MiuixTheme.textStyles.title3, fontWeight = FontWeight.Bold, color = MiuixTheme.colorScheme.onSurface)
-                                        Text("总学分", style = MiuixTheme.textStyles.footnote1, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
-                                    }
-                                }
-                            }
+                            Icon(
+                                Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "通过帆软报表接口获取，未评教也能查看",
+                                style = MiuixTheme.textStyles.footnote2,
+                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary
+                            )
                         }
                     }
 
@@ -246,34 +241,42 @@ fun ScoreReportScreen(
                             if (valid.isNotEmpty()) valid.sumOf { it.gpa!! * it.coursePoint } / valid.sumOf { it.coursePoint } else 0.0
                         }
 
-                        item(key = "header_$term") {
+                        // 一个学期 = 一张卡：卡头可折叠，展开后课程逐行排在同一张卡内。
+                        // 之前是"学期头一张卡 + 每门课各一张卡"，滚起来是一串碎片。
+                        item(key = "term_$term") {
                             top.yukonga.miuix.kmp.basic.Card(
-                                modifier = Modifier.fillMaxWidth(),
-                                onClick = {
-                                    expandedTerms = if (isExpanded) expandedTerms - term else expandedTerms + term
-                                },
-                                pressFeedbackType = top.yukonga.miuix.kmp.utils.PressFeedbackType.Sink
+                                modifier = Modifier.fillMaxWidth().animateContentSize(),
+                                colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(
+                                    color = com.xjtu.toolbox.ui.components.AppCardColor
+                                )
                             ) {
-                                Row(
-                                    Modifier.fillMaxWidth().padding(16.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Column {
-                                        Text(formatTermDisplay(term), style = MiuixTheme.textStyles.subtitle, fontWeight = FontWeight.Bold)
-                                        Text("${grades.size} 门课 · GPA %.2f".format(termGpa), style = MiuixTheme.textStyles.footnote1, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                                Column(Modifier.fillMaxWidth()) {
+                                    Row(
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                expandedTerms = if (isExpanded) expandedTerms - term else expandedTerms + term
+                                            }
+                                            .padding(16.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column {
+                                            Text(formatTermDisplay(term), style = MiuixTheme.textStyles.subtitle, fontWeight = FontWeight.Bold)
+                                            Text("${grades.size} 门课 · GPA %.2f".format(termGpa), style = MiuixTheme.textStyles.footnote1, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                                        }
+                                        Icon(
+                                            if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                            contentDescription = null,
+                                            tint = MiuixTheme.colorScheme.onSurfaceVariantSummary
+                                        )
                                     }
-                                    Icon(
-                                        if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                        contentDescription = null
-                                    )
+                                    if (isExpanded) {
+                                        // 卡头之上已有一行，所以每一行课程都需要上分隔线
+                                        grades.forEach { grade -> ReportGradeRow(grade) }
+                                        Spacer(Modifier.height(4.dp))
+                                    }
                                 }
-                            }
-                        }
-
-                        if (isExpanded) {
-                            items(grades, key = { "${it.term}_${it.courseName}" }) { grade ->
-                                ReportGradeCard(grade)
                             }
                         }
                     }
@@ -286,28 +289,49 @@ fun ScoreReportScreen(
     }
 }
 
+/** 概览卡里的单个统计数字。 */
 @Composable
-private fun ReportGradeCard(grade: ReportedGrade) {
-    top.yukonga.miuix.kmp.basic.Card(
-        modifier = Modifier.fillMaxWidth().animateContentSize()
-    ) {
+private fun ScoreStat(value: String, label: String, color: androidx.compose.ui.graphics.Color) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(value, style = MiuixTheme.textStyles.title3, fontWeight = FontWeight.Bold, color = color)
+        Spacer(Modifier.height(2.dp))
+        Text(label, style = MiuixTheme.textStyles.footnote2, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+    }
+}
+
+/**
+ * 成绩行。
+ *
+ * 原来每门课是一张独立 Card + 12dp 间距，几十门课就是几十个悬浮小方块，
+ * 读起来全是边框和空隙。现在同一学期的课合并进一张卡里，逐行排列 + 细分隔线，
+ * 成绩靠右等宽对齐，扫一列就能比大小。
+ */
+@Composable
+private fun ReportGradeRow(grade: ReportedGrade) {
+    Column(Modifier.fillMaxWidth()) {
+        Box(
+            Modifier
+                .padding(start = 16.dp)
+                .fillMaxWidth()
+                .height(0.5.dp)
+                .background(MiuixTheme.colorScheme.outline.copy(alpha = 0.5f))
+        )
         Row(
-            Modifier.fillMaxWidth().padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.weight(1f)) {
                 Text(
                     grade.courseName,
-                    style = MiuixTheme.textStyles.body1,
+                    style = MiuixTheme.textStyles.body2,
                     fontWeight = FontWeight.Medium,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(2.dp))
                 Text(
                     "${grade.coursePoint} 学分" + if (grade.gpa != null) " · GPA ${"%.2f".format(grade.gpa)}" else "",
-                    style = MiuixTheme.textStyles.footnote1,
+                    style = MiuixTheme.textStyles.footnote2,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary
                 )
             }
@@ -321,7 +345,7 @@ private fun ReportGradeCard(grade: ReportedGrade) {
             }
             Text(
                 grade.score,
-                style = MiuixTheme.textStyles.headline1,
+                style = MiuixTheme.textStyles.title4,
                 fontWeight = FontWeight.Bold,
                 color = scoreColor
             )

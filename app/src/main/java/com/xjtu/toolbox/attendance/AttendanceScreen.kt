@@ -57,6 +57,8 @@ import com.xjtu.toolbox.ui.components.ErrorState
 import com.xjtu.toolbox.ui.components.LoadingState
 import com.xjtu.toolbox.ui.components.EmptyState
 import com.xjtu.toolbox.ui.components.AppFilterChip
+import com.xjtu.toolbox.ui.components.AppCardColor
+import com.xjtu.toolbox.ui.components.AppInsetColor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -321,9 +323,7 @@ fun AttendanceScreen(
             ) {
                 Card(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                    colors = CardDefaults.defaultColors(
-                        color = MiuixTheme.colorScheme.secondaryContainer
-                    )
+                    colors = CardDefaults.defaultColors(color = AppCardColor)
                 ) {
                     if (termItems.isNotEmpty()) {
                         OverlaySpinnerPreference(
@@ -358,6 +358,15 @@ fun AttendanceScreen(
                     tabs = listOf("概览", "流水"),
                     selectedTabIndex = selectedTab,
                     onTabSelected = { selectedTab = it },
+                    // 默认轨道色是 surface，和页面背景（同为 surface）同色，轨道等于隐形。
+                    // 上一版换成 AppInsetColor（surfaceContainerHigh 半透明）在浅色下够用，
+                    // 但深色主题页面背景是纯黑，0xFF242424 半透明叠在纯黑上还是几乎看不出来。
+                    // 换成 onBackground.copy(alpha=...)——这是 miuix BreadcrumbBarDefaults 自己
+                    // 用的技巧：onBackground 在浅色是黑、深色是近白，同一份 alpha 在两个主题下
+                    // 都能相对页面背景做出稳定的浅灰对比，不需要为每个主题单独调值。
+                    colors = top.yukonga.miuix.kmp.basic.TabRowDefaults.tabRowColors(
+                        backgroundColor = MiuixTheme.colorScheme.onBackground.copy(alpha = 0.06f)
+                    ),
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
                 )
 
@@ -374,9 +383,9 @@ fun AttendanceScreen(
                     label = "attendanceTab"
                 ) { tab ->
                     when (tab) {
-                        0 -> OverviewTab(studentName, courseStats, totalNormal, totalLate,
-                            totalAbsence, totalLeave, displayRecords.size, attendanceRate,
-                            selectedWeek, searchQuery) { searchQuery = it }
+                        0 -> OverviewTab(courseStats, totalNormal, totalLate,
+                            totalAbsence, totalLeave, attendanceRate,
+                            searchQuery) { searchQuery = it }
                         1 -> RecordFlowTab(filteredRecords, selectedStatus, displayRecords.size,
                             searchQuery, { searchQuery = it }) { selectedStatus = it }
                     }
@@ -389,11 +398,9 @@ fun AttendanceScreen(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun OverviewTab(
-    studentName: String,
     courseStats: List<CourseAttendanceStat>,
     totalNormal: Int, totalLate: Int, totalAbsence: Int, totalLeave: Int,
-    totalRecords: Int, attendanceRate: Int,
-    selectedWeek: Int?,
+    attendanceRate: Int,
     searchQuery: String,
     onSearchChange: (String) -> Unit
 ) {
@@ -402,103 +409,52 @@ private fun OverviewTab(
         verticalArrangement = Arrangement.spacedBy(8.dp),
         contentPadding = PaddingValues(vertical = 12.dp)
     ) {
-        // 概览卡片
+        // 出勤率环形已删：miuix CircularProgressIndicator 的 Canvas 内部按 size 参数
+        // （默认 30dp）画图，外层 Modifier.fillMaxSize() 会被内部 .size(size) 覆盖，
+        // 手动传 size 才能对齐，试了几次都在文字和圆环之间错位。既然只有百分比数字本身
+        // 有用，直接用大号文字表达，不需要绘制一个图形元素来表达一个数字。
         item {
-            top.yukonga.miuix.kmp.basic.Card(
-                Modifier.fillMaxWidth(),
-                colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(color = if (attendanceRate < 70) MiuixTheme.colorScheme.errorContainer
-                    else MiuixTheme.colorScheme.surface
-                )
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.defaultColors(color = AppCardColor)
             ) {
-                Column(Modifier.padding(16.dp)) {
-                    Row(Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Column {
-                            Text("$studentName 的考勤", style = MiuixTheme.textStyles.subtitle)
-                            Text(
-                                if (selectedWeek != null) "第${selectedWeek}周 · $totalRecords 条记录"
-                                else "全学期 · $totalRecords 条记录",
-                                style = MiuixTheme.textStyles.footnote1
-                            )
-                        }
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = when {
-                                attendanceRate >= 90 -> MiuixTheme.colorScheme.primary
-                                attendanceRate >= 70 -> MiuixTheme.colorScheme.primaryVariant
-                                else -> MiuixTheme.colorScheme.error
-                            }
-                        ) {
-                            Text(
-                                "${attendanceRate}%",
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                                style = MiuixTheme.textStyles.subtitle,
-                                color = MiuixTheme.colorScheme.onPrimary,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                    if (totalAbsence > 0) {
-                        Spacer(Modifier.height(10.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Icons.Default.WarningAmber, null,
-                                modifier = Modifier.size(15.dp),
-                                tint = MiuixTheme.colorScheme.error
-                            )
-                            Spacer(Modifier.width(5.dp))
-                            Text(
-                                "有 $totalAbsence 次缺勤记录" +
-                                        if (totalLate > 0) "，$totalLate 次迟到" else "",
-                                style = MiuixTheme.textStyles.footnote1,
-                                color = MiuixTheme.colorScheme.error
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(12.dp))
-                    val overviewBarColor = when {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 18.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val rateColor = when {
                         attendanceRate >= 90 -> MiuixTheme.colorScheme.primary
                         attendanceRate >= 70 -> MiuixTheme.colorScheme.primaryVariant
                         else -> MiuixTheme.colorScheme.error
                     }
-                    val animatedOverview by animateFloatAsState(
-                        targetValue = (attendanceRate / 100f).coerceIn(0f, 1f),
-                        animationSpec = spring(dampingRatio = 0.85f, stiffness = 500f),
-                        label = "overviewBar"
-                    )
-                    LinearProgressIndicator(
-                        progress = animatedOverview,
-                        modifier = Modifier.fillMaxWidth(),
-                        height = 6.dp,
-                        colors = ProgressIndicatorDefaults.progressIndicatorColors(
-                            foregroundColor = overviewBarColor,
-                            backgroundColor = overviewBarColor.copy(alpha = 0.12f)
+                    Column {
+                        Text(
+                            "${attendanceRate}%",
+                            style = MiuixTheme.textStyles.title1,
+                            fontWeight = FontWeight.Bold,
+                            color = rateColor
                         )
-                    )
-                }
-            }
-        }
-
-        // 统计信息收进同一张卡，避免仪表盘式的碎片布局。
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.secondaryContainer)
-            ) {
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 14.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly
-                ) {
-                    StatValue("正常", totalNormal, MiuixTheme.colorScheme.primary, Modifier.weight(1f))
-                    StatValue("迟到", totalLate, MiuixTheme.colorScheme.primaryVariant, Modifier.weight(1f))
-                    StatValue("缺勤", totalAbsence, MiuixTheme.colorScheme.error, Modifier.weight(1f))
-                    StatValue(
-                        "请假",
-                        totalLeave,
-                        MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                        Modifier.weight(1f)
-                    )
+                        Text(
+                            "出勤率",
+                            style = MiuixTheme.textStyles.footnote1,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary
+                        )
+                    }
+                    Spacer(Modifier.width(20.dp))
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        StatValue("正常", totalNormal, MiuixTheme.colorScheme.primary, Modifier.weight(1f))
+                        StatValue("迟到", totalLate, MiuixTheme.colorScheme.primaryVariant, Modifier.weight(1f))
+                        StatValue("缺勤", totalAbsence, MiuixTheme.colorScheme.error, Modifier.weight(1f))
+                        StatValue(
+                            "请假",
+                            totalLeave,
+                            MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                            Modifier.weight(1f)
+                        )
+                    }
                 }
             }
         }
@@ -567,8 +523,10 @@ private fun CourseStatCard(stat: CourseAttendanceStat) {
     val hasIssue = stat.abnormalCount > 0
     top.yukonga.miuix.kmp.basic.Card(
         modifier = Modifier.fillMaxWidth(), cornerRadius = 12.dp,
+        // 默认 defaultColors() 用的是 surfaceContainer，深色主题下与页面背景同为 #242424，
+        // 卡片同样会糊掉，所以统一走 AppCardColor
         colors = if (hasIssue) top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(color = MiuixTheme.colorScheme.errorContainer.copy(alpha = 0.15f)
-        ) else top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors()
+        ) else top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(color = AppCardColor)
     ) {
         Column(Modifier.padding(16.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
@@ -603,7 +561,8 @@ private fun CourseStatCard(stat: CourseAttendanceStat) {
                 progress = animatedRate,
                 modifier = Modifier.fillMaxWidth(),
                 height = 4.dp,
-                colors = ProgressIndicatorDefaults.progressIndicatorColors(foregroundColor = barColor, backgroundColor = MiuixTheme.colorScheme.surfaceVariant)
+                // 轨道色不能用 surfaceVariant——那已经是卡片自身的颜色，轨道会看不见
+                colors = ProgressIndicatorDefaults.progressIndicatorColors(foregroundColor = barColor, backgroundColor = AppInsetColor)
             )
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
@@ -657,7 +616,7 @@ private fun RecordFlowTab(
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.secondaryContainer)
+                colors = CardDefaults.defaultColors(color = AppCardColor)
             ) {
                 FlowRow(
                     modifier = Modifier.padding(12.dp),
@@ -748,7 +707,8 @@ private fun AttendanceRecordCard(record: AttendanceWaterRecord) {
     }
     top.yukonga.miuix.kmp.basic.Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surface)
+        // 这里原本用 surface —— 而 Scaffold 背景正是 surface，所以这张卡整个没有背景。
+        colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(color = AppCardColor)
     ) {
         Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min),
             verticalAlignment = Alignment.CenterVertically) {

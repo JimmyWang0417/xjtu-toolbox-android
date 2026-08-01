@@ -21,29 +21,23 @@ data class AppUpdateInfo(
     val notes: String,
     val downloadUrl: String,
     val releaseUrl: String,
-    val channel: String = AppUpdater.CHANNEL_GITEE_STABLE,
+    val channel: String = AppUpdater.CHANNEL_GITEE,
     val channelLabel: String = AppUpdater.channelLabel(channel),
 )
 
 object AppUpdater {
-    const val CHANNEL_GITEE_STABLE = "gitee"
-    const val CHANNEL_GITEE_LATEST = "gitee_latest"
-    const val CHANNEL_GITHUB_STABLE = "github"
-    const val CHANNEL_GITHUB_LATEST = "github_latest"
+    const val CHANNEL_GITEE = "gitee"
+    const val CHANNEL_GITHUB = "github"
     const val AUTO_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000L
 
     val channelKeys = listOf(
-        CHANNEL_GITEE_STABLE,
-        CHANNEL_GITEE_LATEST,
-        CHANNEL_GITHUB_STABLE,
-        CHANNEL_GITHUB_LATEST,
+        CHANNEL_GITEE,
+        CHANNEL_GITHUB,
     )
 
     val channelLabels = listOf(
-        "Gitee 稳定版（推荐）",
-        "Gitee 最新发布",
-        "GitHub 稳定版",
-        "GitHub 最新发布",
+        "Gitee（推荐）",
+        "GitHub",
     )
 
     private val client = OkHttpClient.Builder()
@@ -54,28 +48,26 @@ object AppUpdater {
         .build()
 
     fun normalizeChannel(channel: String?): String = when (channel?.trim()?.lowercase()) {
-        "stable", CHANNEL_GITEE_STABLE -> CHANNEL_GITEE_STABLE
-        "beta", CHANNEL_GITEE_LATEST -> CHANNEL_GITEE_LATEST
-        CHANNEL_GITHUB_STABLE -> CHANNEL_GITHUB_STABLE
-        CHANNEL_GITHUB_LATEST -> CHANNEL_GITHUB_LATEST
-        else -> CHANNEL_GITEE_STABLE
+        // 兼容旧版本存下的 4 渠道值：稳定版/最新版统一归一化为对应主渠道。
+        "stable", "beta", CHANNEL_GITEE, "gitee_latest" -> CHANNEL_GITEE
+        CHANNEL_GITHUB, "github_latest" -> CHANNEL_GITHUB
+        else -> CHANNEL_GITEE
     }
 
     fun channelLabel(channel: String?): String {
         val normalized = normalizeChannel(channel)
         val idx = channelKeys.indexOf(normalized)
-        return channelLabels.getOrElse(idx) { "Gitee 稳定版（推荐）" }
+        return channelLabels.getOrElse(idx) { "Gitee（推荐）" }
     }
 
     suspend fun check(channel: String): AppUpdateInfo? = withContext(Dispatchers.IO) {
         val normalizedChannel = normalizeChannel(channel)
-        val latest = normalizedChannel.endsWith("_latest")
-        val github = normalizedChannel.startsWith("github")
-        val url = when {
-            github && latest -> "https://api.github.com/repos/yeliqin666/xjtu-toolbox-android/releases?per_page=10"
-            github -> "https://api.github.com/repos/yeliqin666/xjtu-toolbox-android/releases/latest"
-            latest -> "https://gitee.com/api/v5/repos/yeliqin666/xjtu-toolbox-android/releases?per_page=10"
-            else -> "https://gitee.com/api/v5/repos/yeliqin666/xjtu-toolbox-android/releases/latest"
+        val github = normalizedChannel == CHANNEL_GITHUB
+        // 统一取“最新发布”（官方 /releases/latest 端点，自动跳过 draft/prerelease）。
+        val url = if (github) {
+            "https://api.github.com/repos/yeliqin666/xjtu-toolbox-android/releases/latest"
+        } else {
+            "https://gitee.com/api/v5/repos/yeliqin666/xjtu-toolbox-android/releases/latest"
         }
         val body = client.newCall(
             Request.Builder()
@@ -87,12 +79,7 @@ object AppUpdater {
             if (!response.isSuccessful) error("服务器响应 ${response.code}")
             response.body?.string() ?: error("服务器没有返回内容")
         }
-        val json = JsonParser.parseString(body)
-        val release = if (latest) {
-            json.asJsonArray.firstOrNull()?.asJsonObject ?: error("暂无可用版本")
-        } else {
-            json.asJsonObject
-        }
+        val release = JsonParser.parseString(body).asJsonObject
         release.toUpdateInfo(normalizedChannel).takeIf {
             MainActivity.compareVersionStrings(BuildConfig.VERSION_NAME, it.version) < 0
         }

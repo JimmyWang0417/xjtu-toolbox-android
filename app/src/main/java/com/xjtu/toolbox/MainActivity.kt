@@ -1,5 +1,6 @@
 package com.xjtu.toolbox
 
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.os.Bundle
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
@@ -30,7 +31,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.imePadding
@@ -44,6 +44,7 @@ import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
+import top.yukonga.miuix.kmp.window.WindowBottomSheet
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
 import top.yukonga.miuix.kmp.basic.ProgressIndicatorDefaults
@@ -86,7 +87,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.graphics.Brush
+import top.yukonga.miuix.kmp.squircle.squircleBackground
+import top.yukonga.miuix.kmp.squircle.squircleBorder
+import top.yukonga.miuix.kmp.squircle.squircleClip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -119,6 +124,7 @@ import com.xjtu.toolbox.ui.theme.XJTUToolBoxTheme
 import com.xjtu.toolbox.ui.theme.serviceColor
 import com.xjtu.toolbox.ui.settings.SettingsScreen
 import com.xjtu.toolbox.ui.components.AmbientGlow
+import com.xjtu.toolbox.ui.components.AppCardColor
 import com.xjtu.toolbox.ui.components.ExpressiveIcon
 import com.xjtu.toolbox.ui.components.ExpressivePanel
 import com.xjtu.toolbox.util.CredentialStore
@@ -240,6 +246,7 @@ object Routes {
     const val WEBVPN_CONVERTER = "webvpn_converter"
     const val AGENT = "agent"
     const val JIAOXIAOZHI = "jiaoxiaozhi"
+    const val ICLASSFACE = "iclassface"
 
     fun login(type: LoginType, target: String) = "login/${type.name}/$target"
     fun browser(url: String = "") = "browser?url=${java.net.URLEncoder.encode(url, "UTF-8")}"
@@ -272,36 +279,20 @@ enum class BottomTab(
 
 class AppLoginState : com.xjtu.toolbox.account.AppLoginStateHolder {
     override var activeUsername by mutableStateOf("")
-    var attendanceLogin by mutableStateOf<AttendanceLogin?>(null)
-    var postgraduateAttendanceLogin by mutableStateOf<AttendanceLogin?>(null)
-    var jwxtLogin by mutableStateOf<JwxtLogin?>(null)
-    var jwappLogin by mutableStateOf<JwappLogin?>(null)
-    var ywtbLogin by mutableStateOf<YwtbLogin?>(null)
-    var libraryLogin by mutableStateOf<LibraryLogin?>(null)
-    var campusCardLogin by mutableStateOf<CampusCardLogin?>(null)
-    var dzpzLogin by mutableStateOf<com.xjtu.toolbox.auth.DzpzLogin?>(null)
-    var venueLogin by mutableStateOf<com.xjtu.toolbox.auth.VenueLogin?>(null)
-    var classLogin by mutableStateOf<com.xjtu.toolbox.classreplay.ClassLogin?>(null)
-    var lmsLogin by mutableStateOf<com.xjtu.toolbox.lms.LmsLogin?>(null)
-    var jiaocaiLogin by mutableStateOf<com.xjtu.toolbox.jiaocai.JiaocaiLogin?>(null)
-    var couponLogin by mutableStateOf<CouponLogin?>(null)
-    var superAppLogin by mutableStateOf<SuperAppLogin?>(null)
-    var fitnessLogin by mutableStateOf<com.xjtu.toolbox.fitness.FitnessLogin?>(null)
-    var jiaoxiaozhiLogin by mutableStateOf<com.xjtu.toolbox.jiaoxiaozhi.JiaoxiaozhiLogin?>(null)
+    // [已移除] 16 个 *Login 缓存字段（attendanceLogin / jwxtLogin / ywtbLogin / …）。
+    // 业务全部迁到 SessionManager + SiteSession 后，它们只剩「= null」的清理路径，
+    // 没有任何赋值点——纯死状态，而且是 mutableStateOf，每次清理都白白触发一轮重组。
+    // 会话真相唯一来源：sessionManager.getSite(siteKey)。
 
-    // 持久化 CookieJar（由 ViewModel 注入；普通直连和 WebVPN 各持一个实例，cookie 物理隔离）
-    var persistentCookieJar: com.xjtu.toolbox.util.PersistentCookieJar? = null
-    var vpnCookieJar: com.xjtu.toolbox.util.PersistentCookieJar? = null
+    // [已移除] persistentCookieJar / vpnCookieJar：cookie 存储唯一归属 SessionManager 的两个 backend。
 
     /** 新会话架构入口；由 [AppLoginStateViewModel] 创建时注入。 */
     var sessionManager: com.xjtu.toolbox.auth.SessionManager? = null
 
-    // SSO 共享 client（携带 CAS TGC cookie）
-    @Volatile private var sharedClient: okhttp3.OkHttpClient? = null
-    private val clientInitMutex = kotlinx.coroutines.sync.Mutex()
-
-    // CAS TGC 未建立前所有 autoLogin 排队，避免多个并行登录各自弹 MFA
-    private val mfaSerialMutex = kotlinx.coroutines.sync.Mutex()
+    // [已移除] sharedClient / clientInitMutex / mfaSerialMutex：
+    // 携带 TGC 的共享 client 现在就是 SessionManager 各 backend 的 client；
+    // 「TGC 建立前排队、避免各自弹 MFA」也已由 CasSiteSession 的 TGC 引导锁 +
+    // SessionManager.askMfaCode 的 mfaMutex 承担，无需在 UI 层再维护一份。
 
     init {
         // 密码失效熔断接入 CAS 闸门：熔断中 XJTULogin/casAuthenticate 一律拒绝提交凭据
@@ -339,19 +330,26 @@ class AppLoginState : com.xjtu.toolbox.account.AppLoginStateHolder {
                 msg.contains("401")
     }
 
-    // 全局共享连接池：所有子系统复用 TLS 连接，避免重复握手
-    private val sharedConnectionPool = okhttp3.ConnectionPool(5, 30, java.util.concurrent.TimeUnit.SECONDS)
+    // [已移除] sharedConnectionPool：连接池现由 SessionBackend 持有（每 backend 一个，
+    // 8 连接 / 5 分钟 keep-alive），最后一个使用者 doLoginWebVpn 已随 WebVPN 统一而删除。
 
-    // WebVPN client（sharedClient + WebVpnInterceptor）
-    @Volatile private var vpnClient: okhttp3.OkHttpClient? = null
-    internal val webVpnClientOrNull: okhttp3.OkHttpClient? get() = vpnClient
+    // ── WebVPN：唯一真相是 SessionManager 的 WEBVPN backend ──────────────
+    // 该 backend 自带 WebVpnInterceptor 与 cookies_webvpn_<账号> jar，
+    // 业务站点（SiteSession）与浏览器路径共用同一份网关会话，不再各认证一次。
+
+    private val webVpnBackend: com.xjtu.toolbox.auth.SessionBackend?
+        get() = sessionManager?.backend(com.xjtu.toolbox.auth.AccessMode.WEBVPN)
+
+    internal val webVpnClientOrNull: okhttp3.OkHttpClient?
+        get() = webVpnBackend?.takeIf { it.webvpnSelfLoggedIn }?.client
 
     fun clearVpnClient() {
-        vpnCookieJar?.clearForDomain("webvpn.xjtu.edu.cn")
-        vpnCookieJar?.clearForDomain(".webvpn.xjtu.edu.cn")
-        vpnCookieJar?.flushToDisk()
-        vpnClient = null
-        webVpnLoggedIn = false
+        webVpnBackend?.let { b ->
+            b.cookieJar.clearForDomain("webvpn.xjtu.edu.cn")
+            b.cookieJar.clearForDomain(".webvpn.xjtu.edu.cn")
+            b.cookieJar.flushToDisk()
+            b.webvpnSelfLoggedIn = false
+        }
     }
 
     /**
@@ -362,7 +360,7 @@ class AppLoginState : com.xjtu.toolbox.account.AppLoginStateHolder {
      * 校园网下没有 vpnClient 时直接返回 false，调用方决定是否需要切到 webvpn 模式。
      */
     suspend fun checkWebVpnSessionAlive(): Boolean = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-        val client = vpnClient ?: return@withContext false
+        val client = webVpnClientOrNull ?: return@withContext false
         try {
             val req = okhttp3.Request.Builder()
                 .url(com.xjtu.toolbox.util.WebVpnUtil.WEBVPN_LOGIN_URL)
@@ -392,24 +390,13 @@ class AppLoginState : com.xjtu.toolbox.account.AppLoginStateHolder {
         }
     }
 
-    /** 清除所有子系统 cached login（不动 sharedClient/cookies），用于 access mode 切换 */
+    /**
+     * 清除所有子系统会话（不动 cookies），用于 access mode 切换。
+     * 现由 SessionManager 统一处理——[com.xjtu.toolbox.auth.SessionManager.onNetworkChanged]
+     * 已对每个 site 调用 invalidateLogin，这里只兜住 sessionManager 尚未注入的早期调用。
+     */
     fun clearAllCachedLogins() {
-        attendanceLogin = null
-        postgraduateAttendanceLogin = null
-        jwxtLogin = null
-        jwappLogin = null
-        ywtbLogin = null
-        libraryLogin = null
-        campusCardLogin = null
-        dzpzLogin = null
-        venueLogin = null
-        classLogin = null
-        lmsLogin = null
-        jiaocaiLogin = null
-        couponLogin = null
-        superAppLogin = null
-        fitnessLogin = null
-        jiaoxiaozhiLogin = null
+        sessionManager?.invalidateAllSites()
     }
 
     /**
@@ -445,7 +432,7 @@ class AppLoginState : com.xjtu.toolbox.account.AppLoginStateHolder {
         return false
     }
     var isOnCampus by mutableStateOf<Boolean?>(null)   // null=未检测, true=校内, false=校外
-    @Volatile private var webVpnLoggedIn = false
+    // [已移除] webVpnLoggedIn：网关登录态改读 SessionBackend.webvpnSelfLoggedIn，避免两处状态漂移。
 
     // 网络检测结果缓存（10 分钟）
     private var campusDetectTime: Long = 0L
@@ -476,12 +463,10 @@ class AppLoginState : com.xjtu.toolbox.account.AppLoginStateHolder {
     override fun clearInMemorySessionState() {
         activeUsername = ""
         savedUsername = ""; savedPassword = ""
-        attendanceLogin = null; postgraduateAttendanceLogin = null; jwxtLogin = null; jwappLogin = null
-        ywtbLogin = null; libraryLogin = null; campusCardLogin = null; jiaocaiLogin = null; couponLogin = null
-        superAppLogin = null; fitnessLogin = null; jiaoxiaozhiLogin = null
-        sharedClient = null
-        vpnClient = null
-        webVpnLoggedIn = false
+        sessionManager?.invalidateAllSites()
+        // 网关登录态随 backend 走：切账号时 reconfigureForAccount 会整体换掉 backends，
+        // 这里额外置一次，覆盖「尚未 reconfigure 就先清内存态」的调用顺序。
+        webVpnBackend?.webvpnSelfLoggedIn = false
         isOnCampus = null
         campusDetectTime = 0L
         ywtbUserInfo = null
@@ -589,29 +574,16 @@ class AppLoginState : com.xjtu.toolbox.account.AppLoginStateHolder {
         cachedRsaKey?.let { store.saveRsaPublicKey(it) }
     }
 
-    /** 供 WebVPN SSO 读取共享 CAS client。 */
-    fun getSharedClient(): okhttp3.OkHttpClient? = sharedClient
+    /**
+     * 携带 CAS TGC 的共享 client —— 现在就是 SessionManager 直连 backend 的 client。
+     * （旧的 sharedClient 字段已删除：它只在「校外别名成 vpnClient」时被赋值，首次永远为 null。）
+     */
+    fun getSharedClient(): okhttp3.OkHttpClient? =
+        sessionManager?.backend(com.xjtu.toolbox.auth.AccessMode.NORMAL)?.client
 
-    /** 清除指定类型的登录缓存（用于 reAuth 失败后强制 full login） */
+    /** 清除指定子系统的会话（用于 reAuth 失败后强制 full login）。 */
     fun clearLogin(type: LoginType) {
-        when (type) {
-            LoginType.ATTENDANCE -> attendanceLogin = null
-            LoginType.POSTGRADUATE_ATTENDANCE -> postgraduateAttendanceLogin = null
-            LoginType.JWXT -> jwxtLogin = null
-            LoginType.JWAPP -> jwappLogin = null
-            LoginType.YWTB -> ywtbLogin = null
-            LoginType.LIBRARY -> libraryLogin = null
-            LoginType.CAMPUS_CARD -> campusCardLogin = null
-            LoginType.DZPZ -> dzpzLogin = null
-            LoginType.VENUE -> venueLogin = null
-            LoginType.CLASS -> classLogin = null
-            LoginType.LMS -> lmsLogin = null
-            LoginType.JIAOCAI -> jiaocaiLogin = null
-            LoginType.COUPON -> couponLogin = null
-            LoginType.SUPER_APP -> superAppLogin = null
-            LoginType.FITNESS -> fitnessLogin = null
-            LoginType.JIAOXIAOZHI -> jiaoxiaozhiLogin = null
-        }
+        sessionManager?.getSiteOrNull(type.siteKey())?.invalidateLogin()
     }
 
     /**
@@ -643,8 +615,17 @@ class AppLoginState : com.xjtu.toolbox.account.AppLoginStateHolder {
      *
      * 波动保护：探测结果若与缓存不同，再做一次确认（间隔 1.5 秒），两次一致才算 mode 变化。
      * 这样可以避免：网络刚切换/信号瞬间抖动导致的误判（一次失败 ≠ 真的校外）。
+     *
+     * 手动模式短路：用户在「设置 → 网络 → 连接模式」选了「强制直连」/「强制 WebVPN」时，
+     * 跳过探测直接返回对应结果——过去这个设置项只写入 [CredentialStore]，从未被读取，
+     * 用户选了「强制 WebVPN」实际什么都不会发生，是纯粹的假开关。
      */
     suspend fun detectCampusNetwork(): Boolean {
+        when (credentialStoreRef?.networkMode) {
+            CredentialStore.NETWORK_DIRECT -> return true
+            CredentialStore.NETWORK_VPN -> return false
+            else -> {} // 自动检测：走下面的真实探测逻辑
+        }
         // 缓存有效期内直接返回
         val cached = isOnCampus
         if (cached != null && System.currentTimeMillis() - campusDetectTime < CAMPUS_CACHE_MS) {
@@ -673,166 +654,34 @@ class AppLoginState : com.xjtu.toolbox.account.AppLoginStateHolder {
     }
 
     /**
-     * WebVPN 登录（校外自动：认证 WebVPN 自身，获取代理 cookie）
+     * WebVPN 网关登录（校外接入）。
      *
-     * 优先走 TGC SSO 免登（复用 sharedClient 的 CAS cookie），
-     * 绕开新版 CAS 的 MFA 手机验证码。
-     * 降级时回退到完整表单登录。
-     */
-    /**
-     * 顶层 WebVPN 登录入口：加锁 + 等 MFA 完成。供 UI / Restore / SessionKeepAlive 等调用。
-     * autoLoginInner 内部应改用 doLoginWebVpn() 无锁版避免死锁。
+     * 【已统一】此前这里维护着**第二套**网关会话：自建 webVpnRewriteClient + vpnCookieJar
+     *（物理文件 `xjtu_cookies`），与 SessionManager 的 WEBVPN backend（`cookies_webvpn_<账号>`）
+     * 各认证一次、各存一份 cookie。校外用户因此要过两次网关认证，可能被要求两次 MFA；
+     * 且两边谁都看不见对方的 TGC，SSO 免密路径互相作废。
+     *
+     * 现在浏览器路径与业务路径共用同一个 WEBVPN backend：
+     * - 网关认证 → [com.xjtu.toolbox.auth.SessionManager.ensureWebVpnLogin]（内含 backend.loginLock
+     *   串行、密码熔断、登录冷却、统一的 App 内 MFA 弹窗）
+     * - TGC 免密 → 该 backend 的 jar 里若已有 TGC，XJTULogin.init 直接 SSO 直通，一次密码都不提交
      */
     suspend fun loginWebVpn(): Boolean {
+        val mgr = sessionManager ?: run { android.util.Log.w("WebVPN", "No sessionManager"); return false }
         if (!hasCredentials) { android.util.Log.w("WebVPN", "No credentials"); return false }
-        if (webVpnLoggedIn && vpnClient != null) { android.util.Log.d("WebVPN", "Already logged in"); return true }
+        if (webVpnClientOrNull != null) { android.util.Log.d("WebVPN", "Already logged in"); return true }
         if (passwordInvalidatedLatch) { android.util.Log.d("WebVPN", "halted by password latch"); return false }
-        return mfaSerialMutex.withLock {
-            if (webVpnLoggedIn && vpnClient != null) return@withLock true
-            val ok = doLoginWebVpn()
-            ok && webVpnLoggedIn && vpnClient != null
-        }
-    }
-
-    /**
-     * 核心 WebVPN 登录实现（无锁版）。
-     * 不要直接调用，请通过 loginWebVpn() 进入。autoLoginInner 内部因可能已持锁
-     * 而调用此版本避免重入死锁。
-     */
-    private suspend fun doLoginWebVpn(): Boolean {
-        if (webVpnLoggedIn && vpnClient != null) return true
         return try {
-            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                // ── 方案1: TGC SSO 免登（优先） ──
-                // sharedClient 已有 JWXT 登录后的 CAS TGC cookie，
-                // 直接 GET WebVPN 登录入口，CAS 看到 TGC 会 302 带回 ST ticket，
-                // WebVPN 验证 ticket 后下发 session cookie，全程无表单 → 绕开 MFA
-                val ssoClient = getSharedClient()
-                if (ssoClient != null) {
-                    try {
-                        android.util.Log.d("WebVPN", "Attempting TGC SSO via sharedClient...")
-                        val ssoRequest = okhttp3.Request.Builder()
-                            .url(com.xjtu.toolbox.util.WebVpnUtil.WEBVPN_LOGIN_URL)
-                            .header("User-Agent", "Mozilla/5.0")
-                            .build()
-                        val ssoResponse = ssoClient.newCall(ssoRequest).execute()
-                        val finalUrl = ssoResponse.request.url.toString()
-                        val bodySnippet = ssoResponse.body?.string()?.take(500) ?: ""
-                        android.util.Log.d("WebVPN", "SSO final URL: $finalUrl")
-                        // 判断成功：最终 URL 在 webvpn 域且不含 cas_login，且未回退到 CAS 表单
-                        val ssoSuccess = finalUrl.contains("webvpn.xjtu.edu.cn") &&
-                            !finalUrl.contains("cas_login") &&
-                            !bodySnippet.contains("id=\"execution\"")
-                        if (ssoSuccess) {
-                            android.util.Log.d("WebVPN", "TGC SSO SUCCESS — bypassed CAS form and MFA")
-                            vpnClient = ssoClient.newBuilder()
-                                .addInterceptor(com.xjtu.toolbox.util.WebVpnInterceptor())
-                                .build()
-                            webVpnLoggedIn = true
-                            if (isOnCampus == false) sharedClient = vpnClient
-                            return@withContext true
-                        }
-                        android.util.Log.d("WebVPN", "TGC SSO failed (ended on CAS login page), falling back to full login")
-                    } catch (e: Exception) {
-                        android.util.Log.w("WebVPN", "TGC SSO attempt failed: ${e.message}, falling back")
-                    }
-                }
-
-                // ── 方案2: 完整表单登录（降级） ──
-                // [关键] 必须用「带 WebVpnInterceptor 的 client」让登录链路走 webvpn 反向代理
-                // 否则校外环境下 XJTULogin 内部访问 login.xjtu.edu.cn（CAS）会直连超时（公网解析为内网IP）
-                vpnCookieJar?.clearForDomain("webvpn.xjtu.edu.cn")
-                vpnCookieJar?.clearForDomain(".webvpn.xjtu.edu.cn")
-                vpnCookieJar?.flushToDisk()
-                android.util.Log.d("WebVPN", "Creating XJTULogin for WebVPN URL with WebVpnInterceptor")
-                val webVpnRewriteClient = okhttp3.OkHttpClient.Builder()
-                    .addInterceptor(okhttp3.brotli.BrotliInterceptor)
-                    .addInterceptor(com.xjtu.toolbox.util.WebVpnInterceptor())
-                    .cookieJar(vpnCookieJar ?: okhttp3.JavaNetCookieJar(java.net.CookieManager().apply {
-                        setCookiePolicy(java.net.CookiePolicy.ACCEPT_ALL)
-                    }))
-                    .followRedirects(true)
-                    .followSslRedirects(true)
-                    .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                    .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                    .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                    .connectionPool(sharedConnectionPool)
-                    .build()
-                val login = XJTULogin(
-                    com.xjtu.toolbox.util.WebVpnUtil.WEBVPN_LOGIN_URL,
-                    existingClient = webVpnRewriteClient,  // 关键：带 WebVpnInterceptor
-                    visitorId = firstVisitorId,
-                    cookieJar = vpnCookieJar
-                )
-                android.util.Log.d("WebVPN", "XJTULogin created, hasLogin=${login.hasLogin}, calling login()...")
-                val result = login.login(savedUsername, savedPassword)
-                android.util.Log.d("WebVPN", "login() returned: state=${result.state}, msg=${result.message}")
-                if (result.state == LoginState.SUCCESS) {
-                    // login.client 已是带 WebVpnInterceptor 的 client，直接复用
-                    vpnClient = login.client
-                    webVpnLoggedIn = true
-                    // [关键] 校外让 sharedClient 也指向 vpnClient：
-                    // webvpn 反向代理会把上游响应的 set-cookie domain 改写为 webvpn.xjtu.edu.cn，
-                    // TGC 等实际写在 webvpn 域；sharedClient 直连 xjtu.edu.cn 那个域查不到。
-                    // 让 sharedClient = vpnClient 后，所有业务调用都走 webvpn 代理，SSO 能成功。
-                    if (isOnCampus == false) sharedClient = vpnClient
-                    android.util.Log.d("WebVPN", "WebVPN login SUCCESS, vpnClient = webVpnRewriteClient (sharedClient aliased)")
-                    true
-                } else if (result.state == LoginState.REQUIRE_ACCOUNT_CHOICE) {
-                    // 处理多身份账号选择
-                    android.util.Log.d("WebVPN", "Account choice required, selecting configured account type")
-                    val finalResult = login.login(accountType = selectedCasAccountType())
-                    android.util.Log.d("WebVPN", "Account choice result: state=${finalResult.state}")
-                    if (finalResult.state == LoginState.SUCCESS) {
-                        vpnClient = login.client
-                        webVpnLoggedIn = true
-                        if (isOnCampus == false) sharedClient = vpnClient
-                        true
-                    } else false
-                } else if (result.state == LoginState.REQUIRE_MFA) {
-                    android.util.Log.w("WebVPN", "WebVPN MFA triggered, delegating to SessionManager")
-                    val ctx = result.mfaContext ?: return@withContext false
-                    if (ctx.flow == com.xjtu.toolbox.auth.MFAFlow.MFA_DETECT) {
-                        try {
-                            ctx.sendVerifyCode()
-                        } catch (e: Exception) {
-                            android.util.Log.w("WebVPN", "send MFA code failed: ${e.message}")
-                            return@withContext false
-                        }
-                    }
-                    val mgr = sessionManager ?: return@withContext false
-                    val code = mgr.askMfaCode("webvpn", "WebVPN（校外接入）", ctx)
-                        ?: return@withContext false
-                    try {
-                        ctx.verifyCode(code)
-                    } catch (e: Exception) {
-                        android.util.Log.w("WebVPN", "MFA verify failed: ${e.message}")
-                        return@withContext false
-                    }
-                    var postMfa = login.login()
-                    if (postMfa.state == LoginState.REQUIRE_ACCOUNT_CHOICE) {
-                        postMfa = login.login(accountType = selectedCasAccountType())
-                    }
-                    if (postMfa.state == LoginState.SUCCESS) {
-                        vpnClient = login.client
-                        webVpnLoggedIn = true
-                        if (isOnCampus == false) sharedClient = vpnClient
-                        android.util.Log.d("WebVPN", "WebVPN login SUCCESS via SessionManager MFA")
-                        true
-                    } else {
-                        android.util.Log.w("WebVPN", "WebVPN post-MFA failed: ${postMfa.state} ${postMfa.message}")
-                        false
-                    }
-                } else {
-                    android.util.Log.w("WebVPN", "WebVPN login returned non-SUCCESS state: ${result.state}")
-                    false
-                }
-            }
+            mgr.ensureWebVpnLogin()
+            val ok = webVpnClientOrNull != null
+            android.util.Log.d("WebVPN", "loginWebVpn via SessionManager: ok=$ok")
+            ok
         } catch (e: Exception) {
-            android.util.Log.e("WebVPN", "WebVPN login exception", e)
+            android.util.Log.w("WebVPN", "loginWebVpn failed: ${e.message}")
             false
         }
     }
+
 
     /**
      * 兼容兜底登出。多账号架构下请优先用 [com.xjtu.toolbox.account.AccountManager.logoutCurrent]，
@@ -869,11 +718,9 @@ class AppLoginStateViewModel(application: android.app.Application) : androidx.li
     val loginState = AppLoginState()
     val credentialStore = CredentialStore(application)
     val accountStore = com.xjtu.toolbox.account.AccountStore(application)
-    val persistentCookieJar = com.xjtu.toolbox.util.PersistentCookieJar(application)
-    // [关键] vpnCookieJar 直接复用 persistentCookieJar：
-    // WebVpnInterceptor 豁免 login.xjtu.edu.cn → vpnClient 登录得到的 TGC 写在 login.xjtu.edu.cn 域（公网）
-    // sharedClient 共用同一 jar → 校外通过 vpnClient 登录后，sharedClient 访问 pay/login 等公网域也能 SSO。
-    val vpnCookieJar: com.xjtu.toolbox.util.PersistentCookieJar = persistentCookieJar
+    // [已移除] persistentCookieJar / vpnCookieJar（物理文件 xjtu_cookies）：
+    // 它们是旧体系的 cookie 存储，唯一的使用者 doLoginWebVpn 已随 WebVPN 统一而删除。
+    // cookies 现在只有一处：SessionManager 的 cookies_normal_<账号> / cookies_webvpn_<账号>。
 
     /** 新会话架构入口：双 backend、SiteSession 注册中心、MFA 状态机宿主。 */
     val sessionManager = com.xjtu.toolbox.auth.SessionManager(application)
@@ -882,9 +729,7 @@ class AppLoginStateViewModel(application: android.app.Application) : androidx.li
     val accountManager = com.xjtu.toolbox.account.AccountManager(application, accountStore, credentialStore)
 
     init {
-        // 注入持久化组件（无需 LaunchedEffect，ViewModel 创建时即完成）
-        loginState.persistentCookieJar = persistentCookieJar
-        loginState.vpnCookieJar = vpnCookieJar
+        // 注入会话管家（无需 LaunchedEffect，ViewModel 创建时即完成）
         loginState.sessionManager = sessionManager
         // 注册所有业务子系统
         with(sessionManager) {
@@ -905,11 +750,19 @@ class AppLoginStateViewModel(application: android.app.Application) : androidx.li
             register(com.xjtu.toolbox.auth.CampusCardSession())
             register(com.xjtu.toolbox.auth.SuperAppSession())
             register(com.xjtu.toolbox.auth.FitnessSession())
+            register(com.xjtu.toolbox.auth.IclassfaceSession())
+            register(com.xjtu.toolbox.auth.HelloSession())
             register(com.xjtu.toolbox.jiaoxiaozhi.JiaoxiaozhiSiteSession())
         }
         // 绑定 AccountManager 到 sessionManager + loginState
         accountManager.sessionManager = sessionManager
         accountManager.holder = loginState
+
+        // 保活接回新架构：每轮对已登录站点做免密 SSO 续期（静默，撞 MFA 即退出）。
+        // 旧的 LoginProvider 只返回空列表，循环等于空转，会话该凉还是凉。
+        com.xjtu.toolbox.auth.SessionKeepAlive.sessionRefresher = {
+            sessionManager.refreshLoggedInSites()
+        }
 
         // 一次性迁移旧单账号数据 → 首个 Account 命名空间
         val migrated = com.xjtu.toolbox.account.AccountMigration
@@ -1019,7 +872,6 @@ fun AppNavigation(
     val mainScope = rememberCoroutineScope()
     var pendingMainTab by remember { mutableStateOf(initialTab) }
     var homeTheme by remember { mutableStateOf(credentialStore.homeTheme) }
-    var pinnedServices by remember { mutableStateOf(credentialStore.pinnedServices) }
     var showQuickActions by remember { mutableStateOf(credentialStore.showQuickActions) }
 
     // WebVPN 转换页：用户点击"用 WebVPN 打开"但 vpnClient 未就绪时，挂起此 URL，
@@ -1105,7 +957,6 @@ fun AppNavigation(
     // Lifecycle Observer：App 从后台恢复时 proactive 刷新即将过期的 token
     val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
     val lifecycleScope = rememberCoroutineScope()
-    val lastResumeRefresh = remember { mutableLongStateOf(0L) }
     val lastCampusCardResumeRefresh = remember { mutableLongStateOf(0L) }
     val lastLoginWarmupAt = remember { mutableLongStateOf(0L) }
 
@@ -1132,8 +983,15 @@ fun AppNavigation(
                 android.util.Log.d("Warmup", "ensureSite(JWXT) direct to establish SSO")
                 runCatching { loginState.sessionManager?.ensureSite(LoginType.JWXT) }
 
-                // Phase 2 全部移除：剩余 10 个子系统由 navigateWithLogin 按需触发，
-                // 既不打扰用户，也不会一次性触发 N 次 mfa/detect 引发服务端风控。
+                // Phase 2：TGC 已由上面这次登录建立，此后各站点登录是**纯 SSO 免密跳转**。
+                // 只预热「上次用过的几个」，串行 + 静默（撞 MFA 即退出，不弹窗不发短信）。
+                // 与 2026-05 那次被风控的做法的区别：那次是一股脑 11 个站点各自提交密码
+                //（11 次 mfa/detect）；这里一次密码都不提交，且只覆盖用户真正会用的少数几个。
+                val recent = credentialStore.recentSiteKeys
+                if (recent.isNotEmpty()) {
+                    android.util.Log.d("Warmup", "prewarm recent sites: $recent")
+                    runCatching { loginState.sessionManager?.prewarmSites(recent) }
+                }
                 android.util.Log.d("Warmup", "Warmup done: activeSites=${loginState.sessionManager?.activeSiteKeys}")
             } catch (e: Exception) {
                 android.util.Log.w("Warmup", "background login warmup failed: ${e.message}")
@@ -1144,20 +1002,15 @@ fun AppNavigation(
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && loginState.isLoggedIn) {
                 val now = System.currentTimeMillis()
-                val shouldRefreshSessions = now - lastResumeRefresh.longValue >= 30_000L
-                val shouldRefreshCampusCard = now - lastCampusCardResumeRefresh.longValue >= 5_000L
-                if (shouldRefreshSessions) lastResumeRefresh.longValue = now
+                // [policy] 不再于 ON_RESUME 逐站点 ensureLogin 探活：
+                // 该轮询与 SessionKeepAlive（10 分钟周期）和 executeWithReAuth（请求级自愈）
+                // 三重冗余，且每次 resume 串行 N 个网络往返、持有各站点 loginLock，
+                // 用户此刻点进任何功能页都要排队等它 —— 是全局加载缓慢的主因之一。
+                val shouldRefreshCampusCard = now - lastCampusCardResumeRefresh.longValue >= 60_000L
                 if (shouldRefreshCampusCard) lastCampusCardResumeRefresh.longValue = now
-                if (!shouldRefreshSessions && !shouldRefreshCampusCard) return@LifecycleEventObserver
+                if (!shouldRefreshCampusCard) return@LifecycleEventObserver
                 lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                     try {
-                        if (shouldRefreshSessions) {
-                            loginState.sessionManager?.activeSiteKeys?.forEach { key ->
-                                val site = loginState.sessionManager?.getSiteOrNull(key) ?: return@forEach
-                                val creds = loginState.sessionManager?.credentials ?: return@forEach
-                                runCatching { site.ensureLogin(creds.first, creds.second) }
-                            }
-                        }
                         if (shouldRefreshCampusCard) {
                             loginState.sessionManager?.getSiteOrNull("campus_card")?.takeIf { it.hasLogin }?.let { cardSite ->
                                 android.util.Log.d("Lifecycle", "ON_RESUME: refreshing campus card cache (cached session only)")
@@ -1216,6 +1069,7 @@ fun AppNavigation(
                 Routes.MOBILE_JIAODA -> LoginType.SUPER_APP
                 Routes.FITNESS -> LoginType.FITNESS
                 Routes.JIAOXIAOZHI -> LoginType.JIAOXIAOZHI
+                Routes.ICLASSFACE -> LoginType.ICLASSFACE
                 Routes.SCHEDULE -> LoginType.JWXT
                 else -> null
             }
@@ -1312,6 +1166,18 @@ fun AppNavigation(
         // 注意：isLoggedIn 可能仅因 username 已设而为 true，但实际登录实例为 0
         if (loginState.hasCredentials && (loginState.sessionManager?.activeSiteCount ?: 0) == 0) {
             isRestoring = true
+            // Phase 0: 主动探测一次网络环境。[isOnCampus]/[AccessMode] 只有系统的
+            // ConnectivityManager.NetworkCallback（onAvailable/onLost/onCapabilitiesChanged）
+            // 触发时才会更新——若冷启动时网络连接早已稳定、没有 fire 这些回调，
+            // isOnCampus 会一直停在初始值 null、AccessMode 停在硬编码默认值 NORMAL，
+            // 完全不反映用户实际所在的网络环境。必须在这里主动探测一次兜底。
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    loginState.onNetworkChanged()
+                } catch (e: Exception) {
+                    android.util.Log.w("Restore", "Phase0 网络探测失败", e)
+                }
+            }
             // Phase 1: 直连恢复 JWXT（串行，避免竞争）
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 try {
@@ -1426,6 +1292,19 @@ fun AppNavigation(
     }
 
     CompositionLocalProvider(LocalAppLoginState provides loginState) {
+    // 注意：不要在这里套一层 Scaffold 来给 overlay 弹窗提供宿主。
+    //
+    // 背景：miuix 0.9.3 起 OverlayDialog/OverlayBottomSheet/OverlayListPopup 默认
+    // `renderInRootScaffold = true`，需要 Scaffold 提供 LocalDialogStates 才会被渲染，
+    // 所以"在根部套一层 Scaffold"看起来能一次性修好全项目的弹窗。**实际不行**：
+    // miuix 的 ScaffoldLayout 内部是 SubcomposeLayout，套在这里等于把整棵导航树塞进
+    // 一个 subcompose 槽，测量条件变化时内容会被丢弃重建，页面里 rememberCoroutineScope
+    // 拿到的 scope 随之失效——真机表现为日程页
+    // `ForgottenCoroutineScopeException: rememberCoroutineScope left the composition`，
+    // 课表、学期列表全部拉不到。已验证并回退。
+    //
+    // 正确做法是把弹窗写进**各自页面 Scaffold 的 content 里**（miuix 的预期用法），
+    // 而不是与 Scaffold 平级放在页面函数体顶层。
     NavHost(
         navController = navController,
         startDestination = Routes.MAIN,
@@ -1466,14 +1345,6 @@ fun AppNavigation(
                 },
                 onWarmupRequest = { startBackgroundLoginWarmup(mainScope, force = true) },
                 homeTheme = homeTheme,
-                pinnedServices = pinnedServices,
-                onTogglePin = { key ->
-                    val newSet = pinnedServices.toMutableSet().apply {
-                        if (contains(key)) remove(key) else add(key)
-                    }
-                    pinnedServices = newSet
-                    credentialStore.pinnedServices = newSet
-                },
                 showQuickActions = showQuickActions
             )
         }
@@ -1680,6 +1551,14 @@ fun AppNavigation(
                 )
             } ?: LaunchedEffect(Unit) { navController.popBackStack() }
         }
+        composable(Routes.ICLASSFACE) {
+            loginState.sessionManager?.getSiteOrNull("iclassface")?.let {
+                com.xjtu.toolbox.iclassface.IclassfaceScreen(
+                    site = it,
+                    onBack = { navController.popBackStack() }
+                )
+            } ?: LaunchedEffect(Unit) { navController.popBackStack() }
+        }
         composable(Routes.JIAOXIAOZHI) {
             com.xjtu.toolbox.jiaoxiaozhi.JiaoxiaozhiScreen(
                 onBack = { navController.popBackStack() },
@@ -1790,8 +1669,6 @@ private fun MainScreen(
     onPendingTabConsumed: () -> Unit = {},
     onWarmupRequest: () -> Unit = {},
     homeTheme: String = CredentialStore.THEME_CARD,
-    pinnedServices: Set<String> = emptySet(),
-    onTogglePin: (String) -> Unit = {},
     showQuickActions: Boolean = true,
 ) {
     // 读取设置的默认 Tab
@@ -1853,6 +1730,8 @@ private fun MainScreen(
     }
 
     fun navigateWithLogin(target: String, type: LoginType) {
+        // 记录使用轨迹：下次冷启动据此做免密 SSO 预热（见 startBackgroundLoginWarmup）
+        runCatching { credentialStore.recordRecentSite(type.siteKey()) }
         // 维护中的服务：直接提示，不进入页面也不触发登录，避免无谓的认证压力
         if (target in maintenanceRoutes) {
             val label = maintenanceLabels[target] ?: type.label
@@ -1893,13 +1772,16 @@ private fun MainScreen(
                 LoginType.SUPER_APP,
                 LoginType.FITNESS,
                 LoginType.JIAOXIAOZHI -> 180_000L
-                else -> 25_000L
+                // 场馆/电子凭证等走「CAS OAuth → org 中转 → 业务站」多跳链路，
+                // 叠加 CasGate 限频与 WebVPN 改写后 25s 常不够用，超时即表现为"打不开"。
+                else -> 60_000L
             }
             autoLoginJob?.cancel() // 取消旧的登录任务，避免竞态
             autoLoginJob = scope.launch {
                 try {
                     val result = kotlinx.coroutines.withTimeoutOrNull(autoLoginTimeoutMs) {
-                        loginState.sessionManager?.ensureSite(type)
+                        // 用户正在等这个页面：豁免站点失败冷却，别让"点了没反应"发生
+                        loginState.sessionManager?.ensureSite(type, userInitiated = true)
                     }
                     showAutoLoginSheet.value = false
                     autoLoginJob = null
@@ -1931,7 +1813,7 @@ private fun MainScreen(
                         showAutoLoginSheet.value = true
                         autoLoginJob = scope.launch {
                             try {
-                                val r2 = kotlinx.coroutines.withTimeoutOrNull(autoLoginTimeoutMs) { loginState.sessionManager?.ensureSite(type) }
+                                val r2 = kotlinx.coroutines.withTimeoutOrNull(autoLoginTimeoutMs) { loginState.sessionManager?.ensureSite(type, userInitiated = true) }
                                 showAutoLoginSheet.value = false
                                 autoLoginJob = null
                                 if (r2 != null) {
@@ -2022,6 +1904,17 @@ private fun MainScreen(
                     if (selectedTab == BottomTab.COURSES) {
                         courseHeaderActions?.invoke(this)
                     }
+                    // 资料站可以下载文件，就近给一个进下载管理的入口——
+                    // 否则用户得退到「我的」页去找，而下载正是在这一页发起的。
+                    if (selectedTab == BottomTab.TOOLS) {
+                        IconButton(onClick = { navController.navigate(Routes.DOWNLOAD_MANAGER) }) {
+                            Icon(
+                                Icons.Default.Download,
+                                contentDescription = "下载管理",
+                                tint = MiuixTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
                 },
                 bottomContent = {
                     if (selectedTab == BottomTab.COURSES) {
@@ -2076,9 +1969,15 @@ private fun MainScreen(
         ) {
         androidx.compose.foundation.layout.Row(Modifier.fillMaxSize().padding(padding)) {
         if (isWideScreen) {
+            // miuix 0.9.3 起 NavigationRail 去掉了 mode 参数，改为传 state 获得可展开侧栏：
+            // 收起态为图标+小字，展开态为「图标 + 文字」横向排布，顶部自带展开/收起按钮。
+            // 平板/折叠屏展开后主标签一眼可读，状态经 rememberSaveable 跨旋转与进程重建保留。
+            val railState = top.yukonga.miuix.kmp.basic.rememberNavigationRailState()
             top.yukonga.miuix.kmp.basic.NavigationRail(
                 color = MiuixTheme.colorScheme.surface,
-                mode = top.yukonga.miuix.kmp.basic.NavigationRailDisplayMode.IconAndText
+                state = railState,
+                expandContentDescription = "展开导航栏",
+                collapseContentDescription = "收起导航栏"
             ) {
                 BottomTab.entries.forEach { tab ->
                     top.yukonga.miuix.kmp.basic.NavigationRailItem(
@@ -2183,8 +2082,6 @@ private fun MainScreen(
                                         scrollBehavior = homeScrollBehavior,
                                         navBarStyle = navBarStyle,
                                         homeTheme = homeTheme,
-                                        pinnedServices = pinnedServices,
-                                        onTogglePin = onTogglePin,
                                         showQuickActions = showQuickActions
                                     )
                                     BottomTab.COURSES -> CoursesTab(loginState, ::navigateWithLogin, onNavigateWithNetCheck, scrollBehavior = coursesScrollBehavior, navBarStyle = navBarStyle, onSubtitleChange = { courseSubtitle = it }, onActionsChange = { courseHeaderActions = it }, onBottomContentChange = { courseHeaderBottomContent = it })
@@ -2433,6 +2330,9 @@ private fun HomeHero(
     }
     val blue = androidx.compose.ui.graphics.Color(0xFF315FD4)
     val violet = androidx.compose.ui.graphics.Color(0xFF7357D8)
+    // 插画尺寸与边距：文字列的右侧预留也由这两个值算出，改一处即可，避免再次对不上
+    val HERO_ART_SIZE = 124.dp
+    val HERO_ART_MARGIN = 6.dp
 
     // 重点信息决定整卡点击去向：有课→日程；无课有余额→校园卡；否则→个人页
     val heroClick = when {
@@ -2442,8 +2342,10 @@ private fun HomeHero(
         else -> onOpenProfile
     }
 
+    // 高度按内容自适应，不设 heightIn(min)：内容约占 130dp，设成更大的值会让
+    // CenterStart 把多余高度上下平分，底部出现空白。插画 124dp + 6dp 边距本身即下限。
     ExpressivePanel(
-        modifier = Modifier.fillMaxWidth().heightIn(min = 168.dp),
+        modifier = Modifier.fillMaxWidth(),
         accent = blue,
         cornerRadius = 28.dp,
         onClick = heroClick,
@@ -2466,19 +2368,29 @@ private fun HomeHero(
             modifier = Modifier.align(Alignment.TopEnd).offset(x = 36.dp, y = (-40).dp),
             size = 190.dp,
         )
+        // 主楼插画。原来是 size(132) + offset(8, 8)：正偏移把图推出卡片右下角造成溢出，
+        // 而文字列只预留了 end = 116dp，比图实际占的 124dp 少 8dp，于是文字与图重叠错位。
+        // 现在去掉偏移、留出边距，并让文字预留宽度与图的占位（HERO_ART_SIZE + 间距）
+        // 由同一组常量算出，不再两处各写一个数字对不上。
         Image(
             painter = painterResource(R.drawable.home_campus_hero),
             contentDescription = "兴庆校区主楼",
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .size(132.dp)
-                .offset(x = 8.dp, y = 8.dp),
+                .padding(end = HERO_ART_MARGIN, bottom = HERO_ART_MARGIN)
+                .size(HERO_ART_SIZE),
             contentScale = ContentScale.Fit,
         )
         Column(
             modifier = Modifier
                 .align(Alignment.CenterStart)
-                .padding(start = 20.dp, top = 18.dp, bottom = 18.dp, end = 116.dp),
+                .padding(
+                    start = 20.dp,
+                    top = 18.dp,
+                    bottom = 18.dp,
+                    // 图的总占位 + 一点呼吸间隙，保证文字永远不会压到画上
+                    end = HERO_ART_SIZE + HERO_ART_MARGIN + 8.dp,
+                ),
         ) {
             Text(
                 dateLabel,
@@ -2535,8 +2447,11 @@ private fun HomeHero(
                 balance >= 0f -> {
                     HeroFocusLine(
                         icon = Icons.Default.CreditCard,
-                        primary = "校园卡余额 ¥${"%.2f".format(balance)}",
-                        secondary = "未来两周暂无日程",
+                        // 文案要短：这一行右边被主楼插画压掉 130dp，"校园卡余额 ¥123.45"
+                        // 在窄屏上会被截成"校园卡余额 ¥1…"，金额反而看不见——
+                        // 而金额才是这行唯一的信息。把定语挪到副标题去。
+                        primary = "¥${"%.2f".format(balance)}",
+                        secondary = "校园卡余额",
                         accent = blue,
                     )
                 }
@@ -2617,6 +2532,19 @@ private fun HeroFocusLine(
     }
 }
 
+/**
+ * 主页服务分类。两种主题（图标宫格 / 卡片）共用同一份分类定义，
+ * 避免出现"图标主题按四类分、卡片主题另有一套场景分组且漏掉 7 个服务"这种不一致。
+ */
+private enum class ServiceCategory(val title: String, val subtitle: String) {
+    // 顺序即首页展示顺序。校园生活排第一：校园卡余额、加餐券、体测、黄页都在这一类，
+    // 是**实时信息最密集**的一块，放最前面首屏就有内容可看。
+    LIFE("校园生活", "支付、校历与场馆服务"),
+    CLASS("上课", "课表、自习与课程内容"),
+    STUDY("学业", "成绩、评教与学习资料"),
+    TOOL("工具与助手", "智能助手与连接工具"),
+}
+
 @Composable
 private fun HomeTab(
     loginState: AppLoginState,
@@ -2628,8 +2556,6 @@ private fun HomeTab(
     scrollBehavior: ScrollBehavior? = null,
     navBarStyle: String = "floating",
     homeTheme: String = CredentialStore.THEME_CARD,
-    pinnedServices: Set<String> = emptySet(),
-    onTogglePin: (String) -> Unit = {},
     showQuickActions: Boolean = true,
 ) {
     // ── 仪表盘数据：下一节日程 + 校园卡余额缓存（供 Hero 重点信息区使用）──
@@ -2892,43 +2818,46 @@ private fun HomeTab(
         Spacer(Modifier.height(24.dp))
 
         // ── 服务分类宫格 ──
+        // 分类是数据的一部分，不再是注释 + subList(0,7) 这种靠列表顺序的魔法下标：
+        // 那种写法一旦在中间插入服务，后面所有分组会静默错位。
         data class MoreSvc(
             val key: String,
             val icon: ImageVector,
             val title: String,
             val color: androidx.compose.ui.graphics.Color,
+            val category: ServiceCategory,
             val onClick: () -> Unit
         )
         val ctx = LocalContext.current
         val allServices = listOf(
-            // 上课
-            MoreSvc(Routes.SCHEDULE, Icons.Default.CalendarMonth, "日程", com.xjtu.toolbox.ui.theme.legacyColor(Routes.SCHEDULE)) { onNavigateToCourses() },
-            MoreSvc(Routes.EMPTY_ROOM, Icons.Default.MeetingRoom, "空闲教室", com.xjtu.toolbox.ui.theme.legacyColor(Routes.EMPTY_ROOM)) { onNavigateWithLogin(Routes.EMPTY_ROOM, LoginType.JWXT) },
-            MoreSvc(Routes.LMS, Icons.Default.School, "思源", com.xjtu.toolbox.ui.theme.legacyColor(Routes.LMS)) { onNavigateWithLogin(Routes.LMS, LoginType.LMS) },
-            MoreSvc(Routes.CLASS_REPLAY, Icons.Default.OndemandVideo, "课程回放", com.xjtu.toolbox.ui.theme.legacyColor(Routes.CLASS_REPLAY)) { onNavigateWithLogin(Routes.CLASS_REPLAY, LoginType.CLASS) },
-            MoreSvc(Routes.SCHOOL_COURSE, Icons.Default.TravelExplore, "课程查询", com.xjtu.toolbox.ui.theme.legacyColor(Routes.SCHOOL_COURSE)) { onNavigateWithLogin(Routes.SCHOOL_COURSE, LoginType.JWXT) },
-            MoreSvc(Routes.ATTENDANCE, Icons.Default.EventAvailable, "考勤", com.xjtu.toolbox.ui.theme.legacyColor(Routes.ATTENDANCE)) { onNavigateWithLogin(Routes.ATTENDANCE, LoginType.ATTENDANCE) },
-            MoreSvc(Routes.POSTGRADUATE_ATTENDANCE, Icons.AutoMirrored.Filled.FactCheck, "研考勤", com.xjtu.toolbox.ui.theme.legacyColor(Routes.POSTGRADUATE_ATTENDANCE)) { onNavigateWithLogin(Routes.POSTGRADUATE_ATTENDANCE, LoginType.POSTGRADUATE_ATTENDANCE) },
-            // 学业
-            MoreSvc(Routes.JWAPP_SCORE, Icons.Default.Assessment, "成绩", com.xjtu.toolbox.ui.theme.legacyColor(Routes.JWAPP_SCORE)) { onNavigateWithLogin(Routes.JWAPP_SCORE, LoginType.JWAPP) },
-            MoreSvc(Routes.JUDGE, Icons.Default.RateReview, "评教", com.xjtu.toolbox.ui.theme.legacyColor(Routes.JUDGE)) { onNavigateWithLogin(Routes.JUDGE, LoginType.JWXT) },
-            MoreSvc(Routes.JIAOCAI, Icons.AutoMirrored.Filled.MenuBook, "教材", com.xjtu.toolbox.ui.theme.legacyColor(Routes.JIAOCAI)) { onNavigateWithLogin(Routes.JIAOCAI, LoginType.JIAOCAI) },
-            MoreSvc(Routes.LIBRARY, Icons.Default.Chair, "图书馆", com.xjtu.toolbox.ui.theme.legacyColor(Routes.LIBRARY)) { onNavigateWithLogin(Routes.LIBRARY, LoginType.LIBRARY) },
-            MoreSvc(Routes.TRANSCRIPT, Icons.Default.Description, "成绩单", com.xjtu.toolbox.ui.theme.legacyColor(Routes.TRANSCRIPT)) { onNavigateWithLogin(Routes.TRANSCRIPT, LoginType.DZPZ) },
-            MoreSvc(Routes.NOTIFICATION, Icons.Default.Notifications, "通知公告", com.xjtu.toolbox.ui.theme.legacyColor(Routes.NOTIFICATION)) { onNavigate(Routes.NOTIFICATION) },
-            // 校园生活
-            MoreSvc(Routes.CAMPUS_CARD, Icons.Default.CreditCard, "校园卡", com.xjtu.toolbox.ui.theme.legacyColor(Routes.CAMPUS_CARD)) { onNavigateWithLogin(Routes.CAMPUS_CARD, LoginType.CAMPUS_CARD) },
-            MoreSvc(Routes.PAYMENT_CODE, Icons.Default.QrCode, "付款码", com.xjtu.toolbox.ui.theme.legacyColor(Routes.PAYMENT_CODE)) { onNavigateWithLogin(Routes.PAYMENT_CODE, LoginType.CAMPUS_CARD) },
-            MoreSvc(Routes.COUPON, Icons.Default.Restaurant, "加餐券", com.xjtu.toolbox.ui.theme.legacyColor(Routes.COUPON)) { onNavigateWithLogin(Routes.COUPON, LoginType.COUPON) },
-            MoreSvc(Routes.SCHOOL_CALENDAR, Icons.AutoMirrored.Filled.EventNote, "校历", com.xjtu.toolbox.ui.theme.legacyColor(Routes.SCHOOL_CALENDAR)) { onNavigate(Routes.SCHOOL_CALENDAR) },
-            MoreSvc(Routes.VENUE, Icons.Default.Stadium, "场馆预订", com.xjtu.toolbox.ui.theme.legacyColor(Routes.VENUE)) { onNavigateWithLogin(Routes.VENUE, LoginType.VENUE) },
-            MoreSvc(Routes.FITNESS, Icons.AutoMirrored.Filled.DirectionsRun, "体测查询", com.xjtu.toolbox.ui.theme.legacyColor(Routes.FITNESS)) { onNavigateWithLogin(Routes.FITNESS, LoginType.FITNESS) },
-            MoreSvc(Routes.YELLOW_PAGE, Icons.Default.ContactPhone, "校园黄页", com.xjtu.toolbox.ui.theme.legacyColor(Routes.YELLOW_PAGE)) { onNavigate(Routes.YELLOW_PAGE) },
-            // 工具与助手
-            MoreSvc(Routes.WEBVPN_CONVERTER, Icons.Default.VpnKey, "WebVPN", com.xjtu.toolbox.ui.theme.legacyColor(Routes.WEBVPN_CONVERTER)) { onNavigate(Routes.WEBVPN_CONVERTER) },
-            MoreSvc(Routes.MOBILE_JIAODA, Icons.Default.PhoneAndroid, "移动交大", com.xjtu.toolbox.ui.theme.legacyColor(Routes.MOBILE_JIAODA)) { onNavigateWithLogin(Routes.MOBILE_JIAODA, LoginType.SUPER_APP) },
-            MoreSvc(Routes.JIAOXIAOZHI, Icons.Default.AutoAwesome, "交晓智", com.xjtu.toolbox.ui.theme.legacyColor(Routes.JIAOXIAOZHI)) { onNavigateWithLogin(Routes.JIAOXIAOZHI, LoginType.JIAOXIAOZHI) },
-            MoreSvc(Routes.AGENT, Icons.Default.SmartToy, "屁岱", com.xjtu.toolbox.ui.theme.legacyColor(Routes.AGENT)) { onNavigate(Routes.AGENT) },
+            MoreSvc(Routes.SCHEDULE, Icons.Default.CalendarMonth, "日程", com.xjtu.toolbox.ui.theme.legacyColor(Routes.SCHEDULE), ServiceCategory.CLASS) { onNavigateToCourses() },
+            MoreSvc(Routes.EMPTY_ROOM, Icons.Default.MeetingRoom, "空闲教室", com.xjtu.toolbox.ui.theme.legacyColor(Routes.EMPTY_ROOM), ServiceCategory.CLASS) { onNavigateWithLogin(Routes.EMPTY_ROOM, LoginType.JWXT) },
+            MoreSvc(Routes.LMS, Icons.Default.School, "思源", com.xjtu.toolbox.ui.theme.legacyColor(Routes.LMS), ServiceCategory.CLASS) { onNavigateWithLogin(Routes.LMS, LoginType.LMS) },
+            MoreSvc(Routes.CLASS_REPLAY, Icons.Default.OndemandVideo, "课程回放", com.xjtu.toolbox.ui.theme.legacyColor(Routes.CLASS_REPLAY), ServiceCategory.CLASS) { onNavigateWithLogin(Routes.CLASS_REPLAY, LoginType.CLASS) },
+            MoreSvc(Routes.SCHOOL_COURSE, Icons.Default.TravelExplore, "课程查询", com.xjtu.toolbox.ui.theme.legacyColor(Routes.SCHOOL_COURSE), ServiceCategory.CLASS) { onNavigateWithLogin(Routes.SCHOOL_COURSE, LoginType.JWXT) },
+            MoreSvc(Routes.ATTENDANCE, Icons.Default.EventAvailable, "考勤", com.xjtu.toolbox.ui.theme.legacyColor(Routes.ATTENDANCE), ServiceCategory.CLASS) { onNavigateWithLogin(Routes.ATTENDANCE, LoginType.ATTENDANCE) },
+            MoreSvc(Routes.POSTGRADUATE_ATTENDANCE, Icons.AutoMirrored.Filled.FactCheck, "研考勤", com.xjtu.toolbox.ui.theme.legacyColor(Routes.POSTGRADUATE_ATTENDANCE), ServiceCategory.CLASS) { onNavigateWithLogin(Routes.POSTGRADUATE_ATTENDANCE, LoginType.POSTGRADUATE_ATTENDANCE) },
+            MoreSvc(Routes.ICLASSFACE, Icons.Default.Face, "快速考勤流水", com.xjtu.toolbox.ui.theme.legacyColor(Routes.ICLASSFACE), ServiceCategory.CLASS) { onNavigateWithLogin(Routes.ICLASSFACE, LoginType.ICLASSFACE) },
+
+            MoreSvc(Routes.JWAPP_SCORE, Icons.Default.Assessment, "成绩", com.xjtu.toolbox.ui.theme.legacyColor(Routes.JWAPP_SCORE), ServiceCategory.STUDY) { onNavigateWithLogin(Routes.JWAPP_SCORE, LoginType.JWAPP) },
+            MoreSvc(Routes.JUDGE, Icons.Default.RateReview, "评教", com.xjtu.toolbox.ui.theme.legacyColor(Routes.JUDGE), ServiceCategory.STUDY) { onNavigateWithLogin(Routes.JUDGE, LoginType.JWXT) },
+            MoreSvc(Routes.JIAOCAI, Icons.AutoMirrored.Filled.MenuBook, "教材", com.xjtu.toolbox.ui.theme.legacyColor(Routes.JIAOCAI), ServiceCategory.STUDY) { onNavigateWithLogin(Routes.JIAOCAI, LoginType.JIAOCAI) },
+            MoreSvc(Routes.LIBRARY, Icons.Default.Chair, "图书馆", com.xjtu.toolbox.ui.theme.legacyColor(Routes.LIBRARY), ServiceCategory.STUDY) { onNavigateWithLogin(Routes.LIBRARY, LoginType.LIBRARY) },
+            MoreSvc(Routes.TRANSCRIPT, Icons.Default.Description, "成绩单", com.xjtu.toolbox.ui.theme.legacyColor(Routes.TRANSCRIPT), ServiceCategory.STUDY) { onNavigateWithLogin(Routes.TRANSCRIPT, LoginType.DZPZ) },
+            MoreSvc(Routes.NOTIFICATION, Icons.Default.Notifications, "通知公告", com.xjtu.toolbox.ui.theme.legacyColor(Routes.NOTIFICATION), ServiceCategory.STUDY) { onNavigate(Routes.NOTIFICATION) },
+
+            MoreSvc(Routes.CAMPUS_CARD, Icons.Default.CreditCard, "校园卡", com.xjtu.toolbox.ui.theme.legacyColor(Routes.CAMPUS_CARD), ServiceCategory.LIFE) { onNavigateWithLogin(Routes.CAMPUS_CARD, LoginType.CAMPUS_CARD) },
+            MoreSvc(Routes.PAYMENT_CODE, Icons.Default.QrCode, "付款码", com.xjtu.toolbox.ui.theme.legacyColor(Routes.PAYMENT_CODE), ServiceCategory.LIFE) { onNavigateWithLogin(Routes.PAYMENT_CODE, LoginType.CAMPUS_CARD) },
+            MoreSvc(Routes.COUPON, Icons.Default.Restaurant, "加餐券", com.xjtu.toolbox.ui.theme.legacyColor(Routes.COUPON), ServiceCategory.LIFE) { onNavigateWithLogin(Routes.COUPON, LoginType.COUPON) },
+            MoreSvc(Routes.SCHOOL_CALENDAR, Icons.AutoMirrored.Filled.EventNote, "校历", com.xjtu.toolbox.ui.theme.legacyColor(Routes.SCHOOL_CALENDAR), ServiceCategory.LIFE) { onNavigate(Routes.SCHOOL_CALENDAR) },
+            MoreSvc(Routes.VENUE, Icons.Default.Stadium, "场馆预订", com.xjtu.toolbox.ui.theme.legacyColor(Routes.VENUE), ServiceCategory.LIFE) { onNavigateWithLogin(Routes.VENUE, LoginType.VENUE) },
+            MoreSvc(Routes.FITNESS, Icons.AutoMirrored.Filled.DirectionsRun, "体测查询", com.xjtu.toolbox.ui.theme.legacyColor(Routes.FITNESS), ServiceCategory.LIFE) { onNavigateWithLogin(Routes.FITNESS, LoginType.FITNESS) },
+            MoreSvc(Routes.YELLOW_PAGE, Icons.Default.ContactPhone, "校园黄页", com.xjtu.toolbox.ui.theme.legacyColor(Routes.YELLOW_PAGE), ServiceCategory.LIFE) { onNavigate(Routes.YELLOW_PAGE) },
+
+            MoreSvc(Routes.WEBVPN_CONVERTER, Icons.Default.VpnKey, "WebVPN", com.xjtu.toolbox.ui.theme.legacyColor(Routes.WEBVPN_CONVERTER), ServiceCategory.TOOL) { onNavigate(Routes.WEBVPN_CONVERTER) },
+            MoreSvc(Routes.MOBILE_JIAODA, Icons.Default.PhoneAndroid, "移动交大", com.xjtu.toolbox.ui.theme.legacyColor(Routes.MOBILE_JIAODA), ServiceCategory.TOOL) { onNavigateWithLogin(Routes.MOBILE_JIAODA, LoginType.SUPER_APP) },
+            MoreSvc(Routes.JIAOXIAOZHI, Icons.Default.AutoAwesome, "交晓智", com.xjtu.toolbox.ui.theme.legacyColor(Routes.JIAOXIAOZHI), ServiceCategory.TOOL) { onNavigateWithLogin(Routes.JIAOXIAOZHI, LoginType.JIAOXIAOZHI) },
+            MoreSvc(Routes.AGENT, Icons.Default.SmartToy, "屁岱", com.xjtu.toolbox.ui.theme.legacyColor(Routes.AGENT), ServiceCategory.TOOL) { onNavigate(Routes.AGENT) },
         )
         fun servicesByKeys(keys: List<String>): List<MoreSvc> =
             keys.mapNotNull { key -> allServices.firstOrNull { it.key == key } }
@@ -2948,96 +2877,54 @@ private fun HomeTab(
             return service.copy(color = iconColorByKey[service.key] ?: service.color)
         }
 
-        @Composable
-        fun renderGrid(services: List<MoreSvc>, onLongClick: ((String) -> Unit)? = null) {
-            val rows = services.chunked(4)
-            rows.forEachIndexed { rowIndex, rowItems ->
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    rowItems.forEach { svc ->
-                        HomeGridItem(
-                            icon = svc.icon,
-                            label = svc.title,
-                            color = svc.color,
-                            modifier = Modifier.weight(1f),
-                            onClick = {
-                                com.xjtu.toolbox.util.ServiceUsageTracker.record(ctx, svc.key)
-                                svc.onClick()
-                            },
-                            onLongClick = if (onLongClick != null) ({ onLongClick(svc.key) }) else null,
-                        )
-                    }
-                    repeat(4 - rowItems.size) { Spacer(Modifier.weight(1f)) }
-                }
-                if (rowIndex != rows.lastIndex) Spacer(Modifier.height(8.dp))
-            }
-        }
+        // 两个主题共用的分类视觉标识
+        val categoryIcon = mapOf(
+            ServiceCategory.CLASS to Icons.Default.School,
+            ServiceCategory.STUDY to Icons.Default.Assessment,
+            ServiceCategory.LIFE to Icons.Default.Restaurant,
+            ServiceCategory.TOOL to Icons.Default.SmartToy,
+        )
+        val categoryAccentKey = mapOf(
+            ServiceCategory.CLASS to Routes.SCHEDULE,
+            ServiceCategory.STUDY to Routes.JWAPP_SCORE,
+            ServiceCategory.LIFE to Routes.CAMPUS_CARD,
+            ServiceCategory.TOOL to Routes.AGENT,
+        )
 
         when (homeTheme) {
             CredentialStore.THEME_ICON -> {
-                // Pinned
-                if (pinnedServices.isNotEmpty()) {
-                    val pinnedItems = allServices
-                        .filter { it.key in pinnedServices }
+                // 图标主题 = 分类卡（超椭圆 + 主色渐变 + 细描边）+ 卡内 4 列密集宫格。
+                // 追求"一屏尽收、认图标找功能"，所以格子小、排布规整。
+                //
+                // 收藏夹已彻底删除：长按固定会把项目从当前分类"搬"到页面最上方的收藏夹，
+                // 用户长按"常用功能"里的东西时体验是"东西突然跑到别的地方去了"，混乱。
+                // 现在只保留自动识别的常用功能（按使用频率算），完全不支持手动移动/固定。
+                val categories = ServiceCategory.entries.mapNotNull { category ->
+                    val items = allServices
+                        .filter { it.category == category }
                         .map { coloredForIconTheme(it) }
-                    if (pinnedItems.isNotEmpty()) {
-                        HomeServiceSection("收藏夹") {
-                            renderGrid(pinnedItems, onLongClick = { onTogglePin(it) })
-                        }
-                        Spacer(Modifier.height(24.dp))
-                    }
+                    if (items.isEmpty()) null else category to items
                 }
-
-                val classItems = allServices.subList(0, 7)
-                    .filterNot { it.key in pinnedServices }
-                    .map { coloredForIconTheme(it) }
-                if (classItems.isNotEmpty()) {
-                    HomeServiceSection("上课") {
-                        renderGrid(classItems, onLongClick = { onTogglePin(it) })
-                    }
-                    Spacer(Modifier.height(24.dp))
-                }
-
-                val studyItems = allServices.subList(7, 13)
-                    .filterNot { it.key in pinnedServices }
-                    .map { coloredForIconTheme(it) }
-                if (studyItems.isNotEmpty()) {
-                    HomeServiceSection("学业") {
-                        renderGrid(studyItems, onLongClick = { onTogglePin(it) })
-                    }
-                    Spacer(Modifier.height(24.dp))
-                }
-
-                val lifeItems = allServices.subList(13, 20)
-                    .filterNot { it.key in pinnedServices }
-                    .map { coloredForIconTheme(it) }
-                if (lifeItems.isNotEmpty()) {
-                    HomeServiceSection("校园生活") {
-                        renderGrid(lifeItems, onLongClick = { onTogglePin(it) })
-                    }
-                    Spacer(Modifier.height(24.dp))
-                }
-
-                val toolItems = allServices.subList(20, 24)
-                    .filterNot { it.key in pinnedServices }
-                    .map { coloredForIconTheme(it) }
-                if (toolItems.isNotEmpty()) {
-                    HomeServiceSection("工具与助手") {
-                        renderGrid(toolItems, onLongClick = { onTogglePin(it) })
-                    }
+                categories.forEachIndexed { index, (category, items) ->
+                    HomeCategoryCard(
+                        title = category.title,
+                        subtitle = category.subtitle,
+                        icon = categoryIcon.getValue(category),
+                        accent = com.xjtu.toolbox.ui.theme.legacyColor(categoryAccentKey.getValue(category)),
+                        rows = items.map { svc ->
+                            HomeServiceRow(svc.key, svc.icon, svc.title, svc.color, trackedAction(svc))
+                        },
+                    )
+                    if (index != categories.lastIndex) Spacer(Modifier.height(16.dp))
                 }
             }
             else -> {
                 val usedKeys = mutableSetOf<String>()
-                val pinnedItems = allServices.filter { it.key in pinnedServices }
-                if (pinnedItems.isNotEmpty()) {
-                    usedKeys += pinnedItems.map { it.key }
-                    HomeServiceSection("收藏夹") {
-                        renderGrid(pinnedItems, onLongClick = { onTogglePin(it) })
-                    }
-                    Spacer(Modifier.height(24.dp))
+
+                // ── 屁岱主动提醒 ──
+                // 数据全部取自本地缓存与 Hero 已算好的日程，不为提醒额外发请求。
+                var proactiveMessage by remember {
+                    mutableStateOf<com.xjtu.toolbox.agent.ProactiveMessage?>(null)
                 }
 
                 val quickCandidateKeys = listOf(
@@ -3054,111 +2941,190 @@ private fun HomeTab(
                 ).filterNot { it in usedKeys }
                 val quickKeys = if (showQuickActions && quickCandidateKeys.isNotEmpty()) {
                     remember(quickCandidateKeys) {
-                        com.xjtu.toolbox.util.ServiceUsageTracker.topKeys(
+                        // 屁岱**钉死在第 0 位**：它是主动提醒气泡的锚点，位置必须稳定，
+                        // 否则气泡会跟着频率排序左右横跳。做法是先把它从频率候选里剔除，
+                        // 再单独插到最前——直接参与排序的话，用得少时会被挤掉。
+                        val rest = com.xjtu.toolbox.util.ServiceUsageTracker.topKeys(
                             ctx,
-                            quickCandidateKeys,
-                            n = 4,
-                            fallback = listOf(Routes.CAMPUS_CARD, Routes.EMPTY_ROOM, Routes.AGENT, Routes.NOTIFICATION)
+                            quickCandidateKeys.filterNot { it == Routes.AGENT },
+                            n = 3,
+                            fallback = listOf(Routes.CAMPUS_CARD, Routes.EMPTY_ROOM, Routes.NOTIFICATION)
                                 .filter { it in quickCandidateKeys } + quickCandidateKeys
-                        ).filter { it in quickCandidateKeys }.distinct().take(4)
+                        ).filter { it in quickCandidateKeys && it != Routes.AGENT }.distinct().take(3)
+                        listOf(Routes.AGENT) + rest
                     }
                 } else {
                     emptyList()
                 }
                 val quickShown = servicesByKeys(quickKeys)
                 if (quickShown.isNotEmpty()) {
-                    usedKeys += quickShown.map { it.key }
+                    // 不再把快捷入口从下方分类里剔除：「常用功能」是**额外**多一个入口，
+                    // 不是把功能搬走。原来会 usedKeys += 之后在分类里过滤掉，
+                    // 表现为"某个功能从它所属的分类里凭空消失了"，找不到。
                     Column(Modifier.padding(horizontal = 16.dp)) {
-                        Text(
-                            "常用功能",
-                            style = MiuixTheme.textStyles.headline1,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(start = 4.dp, bottom = 12.dp)
-                        )
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceEvenly
-                        ) {
-                            quickShown.forEach { service ->
-                                HomeQuickAction(
-                                    service.icon,
-                                    service.title,
-                                    service.color,
-                                    onClick = trackedAction(service),
-                                    onLongClick = { onTogglePin(service.key) }
-                                )
+                        HomeSectionHeader("常用功能", Modifier.padding(start = 4.dp, bottom = 12.dp))
+                        Box(Modifier.fillMaxWidth()) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceEvenly
+                            ) {
+                                quickShown.forEach { service ->
+                                    HomeQuickAction(
+                                        service.icon,
+                                        service.title,
+                                        service.color,
+                                        onClick = trackedAction(service)
+                                    )
+                                }
+                            }
+                            // 主动提醒气泡：锚在第 0 个入口（钉死的屁岱）正上方，尖角朝下。
+                            //
+                            // 气泡左对齐，由**尖角位置**去对准图标，而不是移动整个气泡。
+                            // 居中到第 0 格会溢出：那格中心距左边仅约 1/8 屏宽，装不下 260dp。
+                            // 尖角横向偏移按锚点真实中心算：SpaceEvenly 下第 i 格中心为
+                            // 宽度 × (2i+1) / 2n，第 0 格即 宽度 / 2n。
+                            // 这样加减快捷入口或换屏幕宽度都不会跑偏。
+                            proactiveMessage?.let { msg ->
+                                BoxWithConstraints(
+                                    Modifier.fillMaxWidth().offset(y = (-52).dp),
+                                    contentAlignment = Alignment.TopStart
+                                ) {
+                                    val anchorCenter = maxWidth / (2 * quickShown.size)
+                                    com.xjtu.toolbox.agent.ProactiveBubbleView(
+                                        message = msg,
+                                        onOpen = {
+                                            com.xjtu.toolbox.agent.ProactiveRules.markUseful(ctx, msg.id)
+                                            com.xjtu.toolbox.agent.AgentPendingPrompt.set(msg.prompt)
+                                            proactiveMessage = null
+                                            onNavigate(Routes.AGENT)
+                                        },
+                                        onDismiss = {
+                                            com.xjtu.toolbox.agent.ProactiveRules.markDismissed(ctx, msg.id)
+                                            proactiveMessage = null
+                                        },
+                                        onTimeout = { proactiveMessage = null },
+                                        arrowFromStart = anchorCenter,
+                                    )
+                                }
                             }
                         }
                     }
                     Spacer(Modifier.height(24.dp))
                 }
 
-                data class SceneGroup(
-                    val title: String,
-                    val subtitle: String,
-                    val icon: ImageVector,
-                    val accent: androidx.compose.ui.graphics.Color,
-                    val keys: List<String>,
-                )
+                // 卡片主题 = Bento（便当盒）不规则网格。
+                //
+                // 与图标主题的区别必须是**结构性**的，不能只是"给宫格套个壳"——那样两个主题
+                // 只剩几列之差，等于没有区别。这里每个分类的首项占一块 2 列宽的大瓷砖
+                // （大图标 + 名称，主色实心渐变），旁边竖排两块小的，剩下的走 3 列常规块，
+                // 由此产生大小错落的节奏；而图标主题是严格等分的密集宫格。
+                //
+                // 纯布局实现，没有引第三方组件：Bento 的观感来自尺寸对比与留白节奏，
+                // 不是某个控件，为它引依赖只会徒增体积和版本耦合。
+                //
+                // 分类不再各自成卡，改由标题分隔——瓷砖本身就是卡，再套一层就是"卡中卡"。
+                // 各功能的当前状态。全部读**本地缓存**，首页不发任何网络请求
+                // （详见 HomeStats）。拿不到就是 null，该功能退回纯入口。
+                val statsCtx = LocalContext.current
 
-                val sceneGroups = listOf(
-                    SceneGroup("上课", "课表、自习与课程内容", Icons.Default.School, com.xjtu.toolbox.ui.theme.legacyColor(Routes.SCHEDULE), listOf(Routes.SCHEDULE, Routes.EMPTY_ROOM, Routes.LMS)),
-                    SceneGroup("校园生活", "支付、校历与场馆服务", Icons.Default.Restaurant, com.xjtu.toolbox.ui.theme.legacyColor(Routes.CAMPUS_CARD), listOf(Routes.CAMPUS_CARD, Routes.PAYMENT_CODE, Routes.COUPON, Routes.SCHOOL_CALENDAR, Routes.VENUE)),
-                    SceneGroup("学业", "成绩、评教和学习资料", Icons.Default.Assessment, com.xjtu.toolbox.ui.theme.legacyColor(Routes.JWAPP_SCORE), listOf(Routes.JWAPP_SCORE, Routes.JUDGE, Routes.JIAOCAI, Routes.TRANSCRIPT, Routes.LIBRARY)),
-                    SceneGroup("工具与助手", "智能助手与连接工具", Icons.Default.SmartToy, com.xjtu.toolbox.ui.theme.legacyColor(Routes.AGENT), listOf(Routes.AGENT, Routes.JIAOXIAOZHI, Routes.WEBVPN_CONVERTER, Routes.MOBILE_JIAODA)),
-                )
-                val sceneCards = sceneGroups.mapNotNull { group ->
-                    val entries = servicesByKeys(group.keys)
-                        .filterNot { it.key in usedKeys }
-                        .map { service ->
-                            SceneEntry(
-                                label = service.title,
-                                key = service.key,
-                                icon = service.icon,
-                                color = service.color,
-                                action = trackedAction(service)
-                            )
-                        }
-                    if (entries.isEmpty()) null else group to entries
-                }
-                if (sceneCards.isNotEmpty()) {
-                    sceneCards.forEach { (_, entries) ->
-                        usedKeys += entries.map { it.key }
+                // 循环评估：只在冷启动算一次的话，回到首页、余额变化、临近上课都不会再触发，
+                // 表现就是"冒过一次以后再也不冒了"。真正的节流交给 pick() 里的冷却判断。
+                LaunchedEffect(loginState.accountId, loginState.isLoggedIn) {
+                    if (!loginState.isLoggedIn) return@LaunchedEffect
+                    kotlinx.coroutines.delay(com.xjtu.toolbox.agent.ProactiveRules.FIRST_DELAY_MS)
+                    while (true) {
+                    val minutes = scheduleReminderState?.let {
+                        java.time.Duration.between(java.time.LocalDateTime.now(), it.startAt).toMinutes()
                     }
-                    Column(Modifier.padding(horizontal = 16.dp)) {
-                        Text(
-                            "场景入口",
-                            style = MiuixTheme.textStyles.headline1,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(start = 4.dp, bottom = 12.dp)
+                    // 成绩与通知由 HomeStatsRefresher 抓取后留下游标，这里只读不抓——
+                    // 「一次抓取、两处消费」，气泡不为自己额外发请求。
+                    val pendingScores = com.xjtu.toolbox.home.HomeStats.pendingNewScores(statsCtx)
+                    val unseenNotice = com.xjtu.toolbox.home.HomeStats.unseenNoticeTitle(statsCtx)
+                    val msg = com.xjtu.toolbox.agent.ProactiveRules.pick(
+                        ctx = statsCtx,
+                        balance = cachedBalance.takeIf { it >= 0f }?.toDouble(),
+                        nextCourseName = scheduleReminderState?.name,
+                        minutesToClass = minutes,
+                        newGradeCount = pendingScores,
+                        latestNotice = unseenNotice,
+                    )
+                    android.util.Log.d(
+                        "Proactive",
+                        "evaluate: loggedIn=${loginState.isLoggedIn} balance=$cachedBalance " +
+                            "nextCourse=${scheduleReminderState?.name} minutes=$minutes " +
+                            "newScores=$pendingScores notice=${unseenNotice?.take(12)} -> ${msg?.text ?: "无"}"
+                    )
+                    if (msg != null && proactiveMessage == null) {
+                        com.xjtu.toolbox.agent.ProactiveRules.markShown(statsCtx, msg.id)
+                        // 冒过就消费掉，避免同一条反复提醒。冷却只管"多久不再说"，
+                        // 不负责"这件事已经说过了"——两者混用会导致冷却一过又推一遍旧消息。
+                        when (msg.id) {
+                            "grade" -> com.xjtu.toolbox.home.HomeStats.setPendingNewScores(statsCtx, 0)
+                            "notice" -> com.xjtu.toolbox.home.HomeStats.clearUnseenNotice(statsCtx)
+                        }
+                        proactiveMessage = msg
+                    }
+                    kotlinx.coroutines.delay(com.xjtu.toolbox.agent.ProactiveRules.EVAL_INTERVAL_MS)
+                    }
+                }
+                var homeStats by remember { mutableStateOf<Map<String, com.xjtu.toolbox.home.HomeStat>>(emptyMap()) }
+                LaunchedEffect(loginState.accountId, loginState.campusCardCacheVersion) {
+                    val term = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        runCatching {
+                            val dc = com.xjtu.toolbox.util.DataCache(statsCtx)
+                            dc.get("schedule_term_list", Long.MAX_VALUE)?.let { j ->
+                                com.google.gson.Gson().fromJson(j, Array<String>::class.java)?.firstOrNull()
+                            }
+                        }.getOrNull()
+                    }
+                    homeStats = com.xjtu.toolbox.home.HomeStats.collect(statsCtx, term)
+                    // 再跑一轮主动刷新：只拉过期的源，源之间串行留间隔（见 HomeStatsRefresher），
+                    // 拉完重新读一次缓存把新值显示出来。全程静默，失败不打扰用户。
+                    com.xjtu.toolbox.home.HomeStatsRefresher.refreshDue(statsCtx, loginState.sessionManager)
+                    homeStats = com.xjtu.toolbox.home.HomeStats.collect(statsCtx, term)
+                }
+
+                val statOf: (String) -> Pair<String, String?>? = { key ->
+                    when (key) {
+                        // 下节课用 Hero 区已算好的那份，避免重复解析课表
+                        Routes.SCHEDULE -> scheduleReminderState?.let { r ->
+                            val eta = java.time.Duration.between(java.time.LocalDateTime.now(), r.startAt).toMinutes()
+                            r.name to buildString {
+                                append(formatMinuteClock(r.startAt.hour * 60 + r.startAt.minute))
+                                if (r.location.isNotBlank()) append(" · ${r.location}")
+                                if (eta > 0) append(" · ${formatScheduleReminderEta(eta)}")
+                            }
+                        }
+                        // 日程没有下节课时，退回最近一场考试（HomeStats 把它挂在同一个 key 下）
+                        else -> homeStats[key]?.let { it.value to it.detail }
+                    }
+                }
+
+                val categoryCards = ServiceCategory.entries.mapNotNull { category ->
+                    val items = allServices.filter { it.category == category }
+                    if (items.isEmpty()) null else category to items
+                }
+                categoryCards.forEachIndexed { index, (category, items) ->
+                    val rows = items.map { svc ->
+                        val stat = statOf(svc.key)
+                        HomeServiceRow(
+                            key = svc.key,
+                            icon = svc.icon,
+                            title = svc.title,
+                            color = svc.color,
+                            onClick = trackedAction(svc),
+                            stat = stat?.first,
+                            statDetail = stat?.second,
                         )
                     }
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState())
-                            .padding(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        sceneCards.forEach { (group, entries) ->
-                            HomeSceneCard(
-                                title = group.title,
-                                subtitle = group.subtitle,
-                                icon = group.icon,
-                                accent = group.accent,
-                                entries = entries,
-                                onLongClick = onTogglePin
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(24.dp))
-                }
-
-                val moreServices = allServices.filterNot { it.key in usedKeys }
-                if (moreServices.isNotEmpty()) {
-                    HomeServiceSection("更多服务") {
-                        renderGrid(moreServices, onLongClick = { onTogglePin(it) })
-                    }
+                    HomeSceneCard(
+                        title = category.title,
+                        subtitle = category.subtitle,
+                        icon = categoryIcon.getValue(category),
+                        accent = com.xjtu.toolbox.ui.theme.legacyColor(categoryAccentKey.getValue(category)),
+                        rows = rows,
+                    )
+                    if (index != categoryCards.lastIndex) Spacer(Modifier.height(14.dp))
                 }
             }
         }
@@ -3202,9 +3168,12 @@ private fun CoursesTab(
 }
 
 // ══════════════════════════════════════════
-//  Tab 3 — 仲英学辅资料站（搭建中）
+//  Tab 3 — 仲英学辅资料站（zyxf.top）
 // ══════════════════════════════════════════
 
+private const val ZYXF_URL = "https://zyxf.top"
+
+@SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun ToolsTab(
     loginState: AppLoginState,
@@ -3213,50 +3182,396 @@ private fun ToolsTab(
     scrollBehavior: ScrollBehavior? = null,
     navBarStyle: String = "floating"
 ) {
-    Column(
+    var webViewRef by remember { mutableStateOf<android.webkit.WebView?>(null) }
+    var canGoBack by remember { mutableStateOf(false) }
+    var progress by remember { mutableIntStateOf(0) }
+    var isPageLoading by remember { mutableStateOf(true) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    val ctx = LocalContext.current
+    val dlScope = rememberCoroutineScope()
+
+    // blob: 下载桥。
+    //
+    // 资料站用 JS 把文件读进内存后 URL.createObjectURL() 生成 blob: 地址触发下载。
+    // blob: 仅在该页面的 JS 上下文有效，App 侧 HTTP 客户端无法访问
+    // （OkHttp 会抛 "expected url scheme http or https but was blob"）。
+    // 只能由页面内的 JS 读成 base64 回传，App 侧解码落盘。
+    val blobBridge = remember(ctx) {
+        object {
+            @android.webkit.JavascriptInterface
+            fun onBlob(base64: String, fileName: String) {
+                dlScope.launch {
+                    val saved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        runCatching {
+                            // base64 形如 data:application/pdf;base64,xxxx —— MIME 也能顺便取到
+                            val mime = base64.substringAfter("data:", "")
+                                .substringBefore(";", "")
+                            val bytes = android.util.Base64.decode(
+                                base64.substringAfter(","),
+                                android.util.Base64.DEFAULT
+                            )
+                            val uri = com.xjtu.toolbox.lms.LmsDownloadStore.saveBytes(
+                                context = ctx,
+                                fileName = fileName.ifBlank { "download_${System.currentTimeMillis()}" },
+                                mimeType = mime,
+                                bytes = bytes,
+                                category = com.xjtu.toolbox.lms.LmsDownloadStore.CATEGORY_ZYXF,
+                            )
+                            uri to bytes.size
+                        }.getOrElse { e ->
+                            android.util.Log.e("ToolsTab", "blob save failed", e)
+                            null to 0
+                        }
+                    }
+                    val (uri, size) = saved
+                    android.widget.Toast.makeText(
+                        ctx,
+                        if (uri != null) "已保存 $fileName（${size / 1024} KB）" else "保存失败",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
+    }
+
+    // 站内有历史时，系统返回键先回退网页，避免直接退出 App
+    BackHandler(enabled = canGoBack) { webViewRef?.goBack() }
+
+    Box(
         Modifier
             .fillMaxSize()
-            .then(if (scrollBehavior != null) Modifier.nestedScroll(scrollBehavior.nestedScrollConnection) else Modifier)
-            .overScrollVertical()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .padding(bottom = if (navBarStyle == "floating") 88.dp else 0.dp)
     ) {
-        Spacer(Modifier.height(48.dp))
-        Icon(
-            Icons.Default.Construction,
-            contentDescription = null,
-            tint = MiuixTheme.colorScheme.primary,
-            modifier = Modifier.size(72.dp)
+        androidx.compose.ui.viewinterop.AndroidView(
+            factory = { ctx ->
+                android.webkit.WebView(ctx).apply {
+                    layoutParams = android.view.ViewGroup.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.loadWithOverviewMode = true
+                    settings.useWideViewPort = true
+                    webViewClient = object : android.webkit.WebViewClient() {
+                        // 诊断 + 兜底：把每次导航请求打出来。
+                        // 如果点下载后这里出现了一个像文件的 URL 而 DownloadListener 没触发，
+                        // 说明服务端没给 Content-Disposition，WebView 把它当页面导航了 ——
+                        // 这种情况按扩展名判断并自己接管下载。
+                        override fun shouldOverrideUrlLoading(
+                            view: android.webkit.WebView?,
+                            request: android.webkit.WebResourceRequest?
+                        ): Boolean {
+                            val u = request?.url?.toString() ?: return false
+                            android.util.Log.d("ToolsTab", "navigate: $u")
+                            // 不按扩展名判断是否为下载：资料站格式无法穷举
+                            // （.md/.tex/.caj/.tar.gz，甚至没有扩展名），且是否为附件取决于
+                            // 服务器响应头而非 URL 形状。
+                            // 交给 WebView 请求即可，附件类响应会走下面的 DownloadListener。
+                            return false
+                        }
+
+                        override fun onPageStarted(view: android.webkit.WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                            isPageLoading = true
+                            loadError = null
+                        }
+                        override fun onPageFinished(view: android.webkit.WebView?, url: String?) {
+                            isPageLoading = false
+                            canGoBack = view?.canGoBack() == true
+
+                            // 挂钩 a.click()：JS 造 <a href=blob:> 再 click() 这条路径
+                            // 不一定触发 DownloadListener（取决于 WebView 版本与 download 属性），
+                            // 不拦就点了没反应。是 blob 链接就读成 base64 交给桥。
+                            view?.evaluateJavascript(
+                                """
+                                (function() {
+                                  if (window.__xjtuBlobHooked) return;
+                                  window.__xjtuBlobHooked = true;
+                                  var origClick = HTMLAnchorElement.prototype.click;
+                                  HTMLAnchorElement.prototype.click = function() {
+                                    try {
+                                      var h = this.href || '';
+                                      if (h.indexOf('blob:') === 0) {
+                                        var nm = this.getAttribute('download') || 'download';
+                                        var xhr = new XMLHttpRequest();
+                                        xhr.open('GET', h, true);
+                                        xhr.responseType = 'blob';
+                                        xhr.onload = function() {
+                                          var r = new FileReader();
+                                          r.onloadend = function() { XJTUBlobBridge.onBlob(r.result, nm); };
+                                          r.readAsDataURL(xhr.response);
+                                        };
+                                        xhr.send();
+                                        return;
+                                      }
+                                    } catch (e) {}
+                                    return origClick.apply(this, arguments);
+                                  };
+                                })();
+                                """.trimIndent(),
+                                null
+                            )
+                        }
+                        override fun onReceivedError(
+                            view: android.webkit.WebView?,
+                            request: android.webkit.WebResourceRequest?,
+                            error: android.webkit.WebResourceError?
+                        ) {
+                            // 只把主文档失败视为页面错误，子资源失败忽略
+                            if (request?.isForMainFrame == true) {
+                                isPageLoading = false
+                                loadError = "无法连接 zyxf.top，请检查网络后重试"
+                            }
+                        }
+                    }
+                    // 允许 JS 开新窗口，否则 target="_blank" 的下载链接会被直接吞掉
+                    settings.setSupportMultipleWindows(true)
+                    settings.javaScriptCanOpenWindowsAutomatically = true
+                    webChromeClient = object : android.webkit.WebChromeClient() {
+                        override fun onProgressChanged(view: android.webkit.WebView?, newProgress: Int) {
+                            progress = newProgress
+                        }
+
+                        // 资料站的下载链接不少是 target="_blank"。开了 setSupportMultipleWindows 后
+                        // 这类点击会走到这里，如果不处理就**什么都不会发生**（比不开还糟）。
+                        // 这里不真开新窗口，而是把目标 URL 交回当前 WebView：
+                        // 是文件就触发 DownloadListener，是页面就正常导航。
+                        override fun onCreateWindow(
+                            view: android.webkit.WebView?,
+                            isDialog: Boolean,
+                            isUserGesture: Boolean,
+                            resultMsg: android.os.Message?
+                        ): Boolean {
+                            val transport = resultMsg?.obj as? android.webkit.WebView.WebViewTransport
+                                ?: return false
+                            val tmp = android.webkit.WebView(view!!.context)
+                            tmp.webViewClient = object : android.webkit.WebViewClient() {
+                                override fun shouldOverrideUrlLoading(
+                                    v: android.webkit.WebView?,
+                                    req: android.webkit.WebResourceRequest?
+                                ): Boolean {
+                                    req?.url?.toString()?.let { view.loadUrl(it) }
+                                    tmp.destroy()
+                                    return true
+                                }
+                            }
+                            transport.webView = tmp
+                            resultMsg.sendToTarget()
+                            return true
+                        }
+                    }
+                    // 资料站下载落到公共下载目录并登记进 LmsDownloadStore，与成绩单、
+                    // 思源课件同处，在下载管理页作为独立分区显示。
+                    // 不走 classreplay 的 DownloadManager：那套面向回放视频（断点续传、
+                    // 并发限流、按 camera/audio 分轨），文件类下载塞进去会让分类失真。
+                    addJavascriptInterface(blobBridge, "XJTUBlobBridge")
+                    setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+                        android.util.Log.d(
+                            "ToolsTab",
+                            "onDownloadStart: url=$url mime=$mimeType disposition=$contentDisposition"
+                        )
+                        val name = runCatching {
+                            android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType)
+                        }.getOrNull().orEmpty()
+
+                        // blob: 走 JS 桥读内容，不能交给 OkHttp（scheme 不支持，会抛
+                        // "expected url scheme http or https but was blob"）
+                        if (url.startsWith("blob:")) {
+                            val js = """
+                                (function() {
+                                  var xhr = new XMLHttpRequest();
+                                  xhr.open('GET', '$url', true);
+                                  xhr.responseType = 'blob';
+                                  xhr.onload = function() {
+                                    var r = new FileReader();
+                                    r.onloadend = function() {
+                                      XJTUBlobBridge.onBlob(r.result, ${'"'}${name.ifBlank { "download" }}${'"'});
+                                    };
+                                    r.readAsDataURL(xhr.response);
+                                  };
+                                  xhr.onerror = function() { XJTUBlobBridge.onBlob('', ''); };
+                                  xhr.send();
+                                })();
+                            """.trimIndent()
+                            webViewRef?.evaluateJavascript(js, null)
+                            return@setDownloadListener
+                        }
+                        // 普通 http(s) 下载：落到公共 Downloads/XJTUToolBox（与成绩单、思源课件同处），
+                        // 走 MediaStore 不需要存储权限，系统文件管理器可见、卸载不丢。
+                        val cookie = runCatching {
+                            android.webkit.CookieManager.getInstance().getCookie(url)
+                        }.getOrNull()
+                        dlScope.launch {
+                            android.widget.Toast.makeText(
+                                ctx, "开始下载 ${name.ifBlank { "文件" }}", android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                            val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                com.xjtu.toolbox.zyxf.ZyxfDownloader.download(
+                                    context = ctx,
+                                    url = url,
+                                    fallbackName = name,
+                                    userAgent = userAgent,
+                                    cookie = cookie,
+                                )
+                            }
+                            android.widget.Toast.makeText(
+                                ctx,
+                                if (ok != null) "已保存 $ok" else "下载失败，可长按链接用浏览器打开",
+                                android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                    loadUrl(ZYXF_URL)
+                    webViewRef = this
+                }
+            },
+            modifier = Modifier.fillMaxSize()
         )
-        Spacer(Modifier.height(20.dp))
-        Text(
-            "仲英学辅资料站",
-            style = MiuixTheme.textStyles.title2,
-            fontWeight = FontWeight.Bold,
-            color = MiuixTheme.colorScheme.onSurface
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "搭建中",
-            style = MiuixTheme.textStyles.subtitle,
-            color = MiuixTheme.colorScheme.primary,
-            fontWeight = FontWeight.Medium
-        )
-        Spacer(Modifier.height(20.dp))
-        Text(
-            "本页将汇集仲英书院学辅资料、复习指南、课程笔记等内容，敬请期待。",
-            style = MiuixTheme.textStyles.body2,
-            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-        )
-        if (navBarStyle == "floating") Spacer(Modifier.height(96.dp))
+
+        // 顶部加载进度线
+        if (isPageLoading && loadError == null) {
+            LinearProgressIndicator(
+                progress = (progress / 100f).coerceIn(0.05f, 1f),
+                modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
+                height = 2.dp
+            )
+        }
+
+        // 主文档加载失败的兜底页
+        loadError?.let { msg ->
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .background(MiuixTheme.colorScheme.background)
+                    .padding(horizontal = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    Icons.Default.CloudOff,
+                    contentDescription = null,
+                    tint = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    modifier = Modifier.size(56.dp)
+                )
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    "仲英学辅资料站",
+                    style = MiuixTheme.textStyles.title3,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    msg,
+                    style = MiuixTheme.textStyles.body2,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+                Spacer(Modifier.height(20.dp))
+                Button(onClick = {
+                    loadError = null
+                    isPageLoading = true
+                    webViewRef?.loadUrl(ZYXF_URL)
+                }) { Text("重新加载") }
+            }
+        }
     }
 }
 
 // ══════════════════════════════════════════
 //  Tab 4 — 我的（含统一登录）
 // ══════════════════════════════════════════
+
+/**
+ * 学籍档案卡。数据来自 hello.xjtu.edu.cn，字段缺失时整行不渲染——
+ * 宁可少一行，也不要出现"专业：—"这种占位。
+ */
+@Composable
+private fun ProfileInfoCard(p: com.xjtu.toolbox.hello.HelloProfile) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        cornerRadius = 20.dp,
+        colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp)) {
+            HomeSectionHeader("学籍信息")
+            Spacer(Modifier.height(10.dp))
+
+            val rows = buildList {
+                p.departmentName.takeIf { it.isNotBlank() }?.let { add("学院" to it) }
+                p.academyName.takeIf { it.isNotBlank() }?.let { add("书院" to it) }
+                p.professionName.takeIf { it.isNotBlank() }?.let { add("专业" to it) }
+                p.className.takeIf { it.isNotBlank() }?.let { add("班级" to it) }
+                p.campusName.takeIf { it.isNotBlank() }?.let { add("校区" to it) }
+                if (p.grade > 0) {
+                    val len = if (p.schoolingLen > 0) "（学制 ${p.schoolingLen} 年）" else ""
+                    add("年级" to "${p.grade} 级$len")
+                }
+                p.enterSchoolDate.takeIf { it.isNotBlank() }?.let { add("入学" to it) }
+                p.cardId.takeIf { it.isNotBlank() }?.let { add("校园卡号" to it) }
+            }
+            rows.forEachIndexed { index, (label, value) ->
+                if (index > 0) Spacer(Modifier.height(8.dp))
+                Row(Modifier.fillMaxWidth()) {
+                    Text(
+                        label,
+                        style = MiuixTheme.textStyles.body2,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        modifier = Modifier.width(64.dp)
+                    )
+                    Text(
+                        value,
+                        style = MiuixTheme.textStyles.body2,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
+            if (p.hasMentor()) {
+                Spacer(Modifier.height(14.dp))
+                HorizontalDivider(color = MiuixTheme.colorScheme.dividerLine)
+                Spacer(Modifier.height(12.dp))
+                listOfNotNull(
+                    p.counselorName.takeIf { it.isNotBlank() }
+                        ?.let { Triple("辅导员", it, p.counselorPhone) },
+                    p.classTeacherName.takeIf { it.isNotBlank() }
+                        ?.let { Triple("班主任", it, p.classTeacherPhone) },
+                ).forEachIndexed { index, (label, name, phone) ->
+                    if (index > 0) Spacer(Modifier.height(8.dp))
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            label,
+                            style = MiuixTheme.textStyles.body2,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                            modifier = Modifier.width(64.dp)
+                        )
+                        Text(name, style = MiuixTheme.textStyles.body2, fontWeight = FontWeight.Medium)
+                        if (phone.isNotBlank()) {
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                phone,
+                                style = MiuixTheme.textStyles.footnote1,
+                                color = MiuixTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                }
+                p.counselorOffice.takeIf { it.isNotBlank() }?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Row(Modifier.fillMaxWidth()) {
+                        Text(
+                            "办公室",
+                            style = MiuixTheme.textStyles.body2,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                            modifier = Modifier.width(64.dp)
+                        )
+                        Text(it, style = MiuixTheme.textStyles.body2, modifier = Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+    }
+}
 
 /** "我的"页卡片的下压暗叠层按压反馈，替代 SinkFeedback 收缩动画 */
 @Composable
@@ -3296,6 +3611,33 @@ private fun ProfileTab(
     var loginError by remember { mutableStateOf<String?>(null) }
     var loginProgress by remember { mutableStateOf(0f) }   // 0.0 ~ 1.0
     var loginStage by remember { mutableStateOf("") }       // 当前步骤描述
+
+    // ── 个人档案（hello.xjtu.edu.cn）──
+    // 缓存优先：进页面先把磁盘上的读出来立刻渲染，再按新鲜度决定要不要静默刷新，
+    // 全程不阻塞 UI，也不显示加载态——拿不到就退回原有的 YWTB 基础信息。
+    val ctx = LocalContext.current
+    var helloProfile by remember {
+        mutableStateOf(com.xjtu.toolbox.hello.HelloProfileStore.cached(ctx))
+    }
+    var helloAvatar by remember {
+        mutableStateOf(com.xjtu.toolbox.hello.HelloProfileStore.cachedAvatar(ctx))
+    }
+    LaunchedEffect(loginState.isLoggedIn, loginState.activeUsername) {
+        if (!loginState.isLoggedIn) {
+            helloProfile = null
+            helloAvatar = null
+            return@LaunchedEffect
+        }
+        // 切账号后缓存目录随之变化，这里重新读一次本账号的
+        helloProfile = com.xjtu.toolbox.hello.HelloProfileStore.cached(ctx)
+        helloAvatar = com.xjtu.toolbox.hello.HelloProfileStore.cachedAvatar(ctx)
+        com.xjtu.toolbox.hello.HelloProfileStore
+            .ensure(ctx, loginState.sessionManager)
+            ?.let {
+                helloProfile = it
+                helloAvatar = com.xjtu.toolbox.hello.HelloProfileStore.cachedAvatar(ctx)
+            }
+    }
 
     // Srun 校园网首次配置弹窗状态
     val showSrunSetupSheet = remember { mutableStateOf(false) }
@@ -3357,6 +3699,13 @@ private fun ProfileTab(
                             accountManager.updateNickname(user, name)
                         }
                     }
+                } catch (_: Exception) { }
+                // 首次登录抓一次个人档案 + 头像并落盘，之后"我的"页直接读缓存。
+                // 失败不影响登录流程：档案是锦上添花，YWTB 那份基础信息仍在。
+                try {
+                    helloProfile = com.xjtu.toolbox.hello.HelloProfileStore
+                        .ensure(ctx, loginState.sessionManager, force = true)
+                    helloAvatar = com.xjtu.toolbox.hello.HelloProfileStore.cachedAvatar(ctx)
                 } catch (_: Exception) { }
             }
         }
@@ -3477,11 +3826,20 @@ private fun ProfileTab(
                         color = MiuixTheme.colorScheme.primary
                     ) {
                         Box(contentAlignment = Alignment.Center) {
-                            if (loginState.isLoggedIn) {
-                                val initial = (loginState.ywtbUserInfo?.userName ?: loginState.cachedNickname ?: loginState.activeUsername).take(1)
-                                Text(initial, color = MiuixTheme.colorScheme.onPrimary, style = MiuixTheme.textStyles.title2, fontWeight = FontWeight.Bold)
-                            } else {
-                                Icon(Icons.Outlined.Person, null, Modifier.size(36.dp), tint = MiuixTheme.colorScheme.onPrimary)
+                            val avatar = helloAvatar
+                            when {
+                                // 学工系统的证件照。拿不到就退回姓名首字母，绝不留空。
+                                loginState.isLoggedIn && avatar != null -> Image(
+                                    bitmap = avatar.asImageBitmap(),
+                                    contentDescription = "头像",
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                                )
+                                loginState.isLoggedIn -> {
+                                    val initial = (helloProfile?.name ?: loginState.ywtbUserInfo?.userName ?: loginState.cachedNickname ?: loginState.activeUsername).take(1)
+                                    Text(initial, color = MiuixTheme.colorScheme.onPrimary, style = MiuixTheme.textStyles.title2, fontWeight = FontWeight.Bold)
+                                }
+                                else -> Icon(Icons.Outlined.Person, null, Modifier.size(36.dp), tint = MiuixTheme.colorScheme.onPrimary)
                             }
                         }
                     }
@@ -3489,7 +3847,8 @@ private fun ProfileTab(
                     Column {
                         if (loginState.isLoggedIn) {
                             Text(
-                                loginState.ywtbUserInfo?.userName ?: loginState.cachedNickname ?: loginState.activeUsername,
+                                helloProfile?.name?.takeIf { it.isNotBlank() }
+                                    ?: loginState.ywtbUserInfo?.userName ?: loginState.cachedNickname ?: loginState.activeUsername,
                                 style = MiuixTheme.textStyles.title2,
                                 fontWeight = FontWeight.Bold
                             )
@@ -3500,8 +3859,13 @@ private fun ProfileTab(
                                 style = MiuixTheme.textStyles.body2,
                                 color = MiuixTheme.colorScheme.onSurfaceVariantSummary
                             )
-                            // 身份 · 院系（YWTB）
-                            val subtitle = loginState.ywtbUserInfo?.let { info ->
+                            // 副标题优先用 hello 的「班级 · 专业」——比 YWTB 的「身份 · 组织」具体得多
+                            val subtitle = helloProfile?.let { p ->
+                                listOf(p.className, p.professionName)
+                                    .filter { it.isNotBlank() }
+                                    .joinToString(" · ")
+                                    .takeIf { it.isNotBlank() }
+                            } ?: loginState.ywtbUserInfo?.let { info ->
                                 "${info.identityTypeName} · ${info.organizationName}"
                             }
                             subtitle?.let {
@@ -3660,6 +4024,12 @@ private fun ProfileTab(
 
             Column(Modifier.padding(horizontal = 20.dp)) {
 
+                // 学籍档案（hello.xjtu.edu.cn）。缓存优先，没有就整块不渲染。
+                helloProfile?.takeIf { it.hasContent() }?.let { p ->
+                    ProfileInfoCard(p)
+                    Spacer(Modifier.height(12.dp))
+                }
+
                 // 学期 / 教学周 信息（使用 JWXT site）
                 loginState.sessionManager?.getSiteOrNull("jwxt")?.let { jwxtSite ->
                     var currentWeekText by remember { mutableStateOf<String?>(null) }
@@ -3739,7 +4109,7 @@ private fun ProfileTab(
 
                 Spacer(Modifier.height(12.dp))
 
-                // ━━ 下载记录入口卡片 ━━
+                // ━━ 下载管理入口卡片 ━━
                 var downloadStats by remember { mutableStateOf<com.xjtu.toolbox.classreplay.DownloadManager.DownloadStats?>(null) }
                 var lmsDownloadCount by remember { mutableIntStateOf(0) }
                 LaunchedEffect(Unit) {
@@ -3763,7 +4133,7 @@ private fun ProfileTab(
                         Icon(Icons.Default.Download, null, Modifier.size(20.dp), tint = MiuixTheme.colorScheme.primary)
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
-                            Text("下载记录", style = MiuixTheme.textStyles.body1, fontWeight = FontWeight.Medium)
+                            Text("下载管理", style = MiuixTheme.textStyles.body1, fontWeight = FontWeight.Medium)
                             val stats = downloadStats
                             if (stats != null) {
                                 val statsText = buildString {
@@ -4015,55 +4385,309 @@ private fun formatScheduleReminderDateLabel(targetDate: java.time.LocalDate, tod
     }
 }
 
-@Composable
-private fun HomeServiceSection(
-    title: String,
-    content: @Composable ColumnScope.() -> Unit,
+/**
+ * 两个主题共用的服务条目数据。
+ *
+ * [stat] / [statDetail] 是卡片主题的核心：**有实时状态可展示的服务才配大卡**。
+ * 图标主题忽略这两个字段——它的定位是等分入口宫格。
+ */
+private data class HomeServiceRow(
+    val key: String,
+    val icon: ImageVector,
+    val title: String,
+    val color: androidx.compose.ui.graphics.Color,
+    val onClick: () -> Unit,
+    /** 主数据，大字号展示，如「¥42.50」「高等数学」。null 表示没有可展示的状态。 */
+    val stat: String? = null,
+    /** 辅助说明，小字，如「08:00 · 主楼A-203 · 还有2小时」。 */
+    val statDetail: String? = null,
 ) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp),
-        cornerRadius = 22.dp,
-        colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(
-            color = MiuixTheme.colorScheme.surface
+    val hasStat: Boolean get() = !stat.isNullOrBlank()
+}
+
+/**
+ * 卡片主题的分类卡。
+ *
+ * 设计取向是**克制**。避免大面积光晕与 2 列超大瓷砖：光晕盖过标题、瓷砖占半屏宽会
+ * 把图标撑大、留白空洞，一屏装不下几个功能。具体做法：
+ * - 去掉光晕，分类主色只留标题左侧一根 3dp 竖条，够做区分又不喧宾夺主；
+ * - 3 列紧凑瓷砖，图标 38dp，一屏能完整看到一个分类；
+ * - 瓷砖底色用中性的 surfaceVariant 而不是分类主色染色，避免整卡花花绿绿；
+ * - 圆角、内边距整体收一档（28→24、18→14）。
+ *
+ * 与图标主题的区别仍然立得住：图标主题是**无卡片的 4 列通栏宫格**，这里是**成卡分组
+ * 的 3 列**，卡片边界 + 分类标题 + 副标题承担信息层级。
+ */
+@Composable
+private fun HomeCategoryCard(
+    title: String,
+    subtitle: String,
+    icon: ImageVector,
+    accent: androidx.compose.ui.graphics.Color,
+    rows: List<HomeServiceRow>,
+) {
+    val isDark = isSystemInDarkTheme()
+    // 分类主色的对角渐变，浓度压得很低——它是"氛围"，不是"色块"。
+    // 深色模式下同样的 alpha 会显脏，所以两套值。
+    val tint = if (isDark) 0.16f else 0.10f
+    val fill = Brush.linearGradient(
+        listOf(
+            accent.copy(alpha = tint),
+            accent.copy(alpha = tint * 0.25f),
+            AppCardColor
         )
+    )
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            // squircleBackground 只接受纯色，渐变要走 clip + background(brush)
+            .squircleClip(CARD_RADIUS)
+            .background(fill)
+            // 细边框是精致感的关键。之前整卡没有任何描边，边界全靠底色差，
+            // 在浅色主题下几乎看不出卡在哪儿，就显得"糊成一片"。
+            .squircleBorder(1.dp, accent.copy(alpha = if (isDark) 0.28f else 0.20f), CARD_RADIUS)
+            .padding(horizontal = 16.dp, vertical = 16.dp)
     ) {
-        Column(Modifier.fillMaxWidth().padding(16.dp)) {
-            Text(
-                title,
-                style = MiuixTheme.textStyles.headline1,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(start = 4.dp, bottom = 10.dp)
-            )
-            content()
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(30.dp)
+                    .squircleBackground(accent.copy(alpha = if (isDark) 0.28f else 0.16f), 10.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(17.dp))
+            }
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MiuixTheme.textStyles.headline1, fontWeight = FontWeight.Bold)
+                Text(
+                    subtitle,
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
+        Spacer(Modifier.height(14.dp))
+        rows.chunked(4).forEach { group ->
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                group.forEach { row ->
+                    HomeServiceTile(row, Modifier.weight(1f))
+                }
+                repeat(4 - group.size) { Spacer(Modifier.weight(1f)) }
+            }
+            Spacer(Modifier.height(10.dp))
+        }
+    }
+}
+
+/**
+ * 分类卡里的瓷砖：图标 + 名称，**无独立背景块**。
+ *
+ * 关键取舍：不给瓷砖单独的底色。之前每个瓷砖都是一个小圆角色块，整体是"卡片里再套
+ * 一堆小卡片"，这种嵌套容器正是廉价感的来源。现在瓷砖直接落在分类卡的渐变底上，
+ * 卡片本身承担唯一的容器角色，层级干净。按压反馈由 SinkFeedback 提供，不需要底色来提示可点。
+ */
+@Composable
+private fun HomeServiceTile(
+    row: HomeServiceRow,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = SinkFeedback(),
+                onClick = row.onClick
+            )
+            .padding(horizontal = 2.dp, vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        ExpressiveIcon(icon = row.icon, color = row.color, size = 40.dp, iconSize = 21.dp)
+        Spacer(Modifier.height(7.dp))
+        Text(
+            row.title,
+            style = MiuixTheme.textStyles.footnote1,
+            fontWeight = FontWeight.Medium,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+/** 分类卡圆角。超椭圆下这个值可以给得比普通圆角更大而不显得"胀"。 */
+private val CARD_RADIUS = 26.dp
+
+// ══════════════════════════════════════════
+//  卡片主题：场景大卡
+// ══════════════════════════════════════════
+
+/**
+ * 场景大卡：一张卡装下一整类，卡内是**双列数据排版**。
+ *
+ * 与图标主题的分工：
+ * - 图标主题 = 彩色宫格 + 主色渐变卡，回答「有哪些功能」；
+ * - 卡片主题 = **中性卡 + 数据排版**，回答「这一块现在怎么样」。
+ *
+ * 视觉上刻意不用渐变。渐变已经是图标主题的语言，两边都铺一层同样的主色渐变，
+ * 换来的只是"看起来一样"。这里改成：卡片本身中性，主色只出现在**左缘一条书脊**
+ * 和**数值文字**上——颜色少而准，信息才立得住。
+ *
+ * 条目既不是方块也不是胶囊，而是"名称在上、数值在下"的数据格：没有任何背景块，
+ * 卡片是唯一容器。有数据的格子数值用主色加粗，没数据的只剩一行淡名称，
+ * 一眼就能扫出哪里有事。
+ */
+@Composable
+private fun HomeSceneCard(
+    title: String,
+    subtitle: String,
+    icon: ImageVector,
+    accent: androidx.compose.ui.graphics.Color,
+    rows: List<HomeServiceRow>,
+) {
+    if (rows.isEmpty()) return
+    // 有状态的排前面：卡片打开就先看见"有事"的部分
+    val ordered = rows.sortedByDescending { it.hasStat }
+    val liveCount = rows.count { it.hasStat }
+
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .squircleClip(CARD_RADIUS)
+            .background(AppCardColor)
+            .height(IntrinsicSize.Min)
+    ) {
+        // 书脊：整卡左缘一条主色，替代整片渐变做分类识别
+        Box(
+            Modifier
+                .width(4.dp)
+                .fillMaxHeight()
+                .background(accent)
+        )
+        Column(Modifier.weight(1f).padding(start = 15.dp, end = 15.dp, top = 14.dp, bottom = 14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(17.dp))
+                Spacer(Modifier.width(7.dp))
+                Text(title, style = MiuixTheme.textStyles.title4, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.weight(1f))
+                Text(
+                    if (liveCount > 0) "$liveCount 条更新" else subtitle,
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = if (liveCount > 0) accent else MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    fontWeight = if (liveCount > 0) FontWeight.Medium else FontWeight.Normal,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            ordered.chunked(2).forEachIndexed { i, pair ->
+                if (i > 0) Spacer(Modifier.height(2.dp))
+                Row(Modifier.fillMaxWidth()) {
+                    pair.forEach { ServiceStatCell(it, accent, Modifier.weight(1f)) }
+                    if (pair.size == 1) Spacer(Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 数据格：名称（弱）在上，数值（主色加粗）在下，无背景块。
+ * 没有数据时只留名称一行并压低不透明度，让"有事的"自然浮出来。
+ */
+@Composable
+private fun ServiceStatCell(
+    row: HomeServiceRow,
+    accent: androidx.compose.ui.graphics.Color,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = SinkFeedback(),
+                onClick = row.onClick
+            )
+            .padding(vertical = 7.dp, horizontal = 4.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                row.icon,
+                contentDescription = null,
+                tint = if (row.hasStat) row.color else MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                modifier = Modifier.size(14.dp)
+            )
+            Spacer(Modifier.width(5.dp))
+            Text(
+                row.title,
+                style = MiuixTheme.textStyles.footnote1,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        if (row.hasStat) {
+            Spacer(Modifier.height(2.dp))
+            Text(
+                row.stat.orEmpty(),
+                style = MiuixTheme.textStyles.body1,
+                fontWeight = FontWeight.Bold,
+                color = accent,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            row.statDetail?.takeIf { it.isNotBlank() }?.let {
+                Text(
+                    it,
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+/** 主页小节标题：主色强调条 + 粗体标题，全页统一。 */
+@Composable
+private fun HomeSectionHeader(title: String, modifier: Modifier = Modifier) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = modifier) {
+        Box(
+            Modifier
+                .width(4.dp)
+                .height(15.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(MiuixTheme.colorScheme.primary)
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(title, style = MiuixTheme.textStyles.headline1, fontWeight = FontWeight.Bold)
     }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun HomeQuickAction(icon: ImageVector, label: String, color: androidx.compose.ui.graphics.Color, onClick: () -> Unit, onLongClick: (() -> Unit)? = null) {
+private fun HomeQuickAction(icon: ImageVector, label: String, color: androidx.compose.ui.graphics.Color, onClick: () -> Unit) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
-            .clip(RoundedCornerShape(16.dp))
-            .then(
-                if (onLongClick != null)
-                    Modifier.combinedClickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = SinkFeedback(),
-                        onClick = onClick,
-                        onLongClick = onLongClick
-                    )
-                else
-                    Modifier.clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = SinkFeedback(),
-                        onClick = onClick
-                    )
+            .clip(RoundedCornerShape(18.dp))
+            .background(MiuixTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = SinkFeedback(),
+                onClick = onClick
             )
-            .padding(horizontal = 8.dp, vertical = 6.dp)
+            .padding(horizontal = 14.dp, vertical = 10.dp)
     ) {
         ExpressiveIcon(icon = icon, color = color)
         Spacer(Modifier.height(8.dp))
@@ -4071,104 +4695,7 @@ private fun HomeQuickAction(icon: ImageVector, label: String, color: androidx.co
     }
 }
 
-/**
- * 场景入口特色卡：标题 + 场景描述 + 清晰的子入口列表。
- * 整卡点击进入第一个入口，子入口各自可点、可长按固定。
- */
-data class SceneEntry(
-    val label: String,
-    val key: String,
-    val icon: ImageVector,
-    val color: androidx.compose.ui.graphics.Color,
-    val action: () -> Unit,
-)
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun HomeSceneCard(
-    title: String,
-    subtitle: String,
-    icon: ImageVector,
-    accent: androidx.compose.ui.graphics.Color,
-    entries: List<SceneEntry>,
-    onLongClick: ((String) -> Unit)? = null,
-) {
-    ExpressivePanel(
-        modifier = Modifier.width(268.dp),
-        accent = accent,
-        cornerRadius = 24.dp,
-        onClick = entries.firstOrNull()?.action,
-    ) {
-        Column(Modifier.padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                ExpressiveIcon(icon = icon, color = accent, size = 38.dp, iconSize = 20.dp)
-                Spacer(Modifier.width(10.dp))
-                Column {
-                    Text(title, style = MiuixTheme.textStyles.body1, fontWeight = FontWeight.Bold)
-                    Text(
-                        subtitle,
-                        style = MiuixTheme.textStyles.footnote2,
-                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-            Spacer(Modifier.height(12.dp))
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                entries.forEach { entry ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(MiuixTheme.colorScheme.surface.copy(alpha = 0.55f))
-                            .then(
-                                if (onLongClick != null)
-                                    Modifier.combinedClickable(
-                                        interactionSource = remember { MutableInteractionSource() },
-                                        indication = SinkFeedback(),
-                                        onClick = entry.action,
-                                        onLongClick = { onLongClick(entry.key) }
-                                    )
-                                else
-                                    Modifier.clickable(
-                                        interactionSource = remember { MutableInteractionSource() },
-                                        indication = SinkFeedback(),
-                                        onClick = entry.action
-                                    )
-                            )
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        ExpressiveIcon(
-                            icon = entry.icon,
-                            color = entry.color,
-                            size = 30.dp,
-                            iconSize = 16.dp
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            entry.label,
-                            style = MiuixTheme.textStyles.footnote1,
-                            color = MiuixTheme.colorScheme.onSurface,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Spacer(Modifier.weight(1f))
-                        Icon(
-                            Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                            contentDescription = null,
-                            tint = entry.color.copy(alpha = 0.9f),
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-/** 更多服务宫格项：纯图标 + 标签，无背景无副标题。长按可固定/取消固定。 */
-@OptIn(ExperimentalFoundationApi::class)
+/** 更多服务宫格项：纯图标 + 标签，无背景无副标题。 */
 @Composable
 private fun HomeGridItem(
     icon: ImageVector,
@@ -4176,7 +4703,6 @@ private fun HomeGridItem(
     color: androidx.compose.ui.graphics.Color,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
-    onLongClick: (() -> Unit)? = null,
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -4184,20 +4710,10 @@ private fun HomeGridItem(
             .heightIn(min = 86.dp)
             .clip(RoundedCornerShape(18.dp))
             .background(MiuixTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f))
-            .then(
-                if (onLongClick != null)
-                    Modifier.combinedClickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = SinkFeedback(),
-                        onClick = onClick,
-                        onLongClick = onLongClick
-                    )
-                else
-                    Modifier.clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = SinkFeedback(),
-                        onClick = onClick
-                    )
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = SinkFeedback(),
+                onClick = onClick
             )
             .padding(horizontal = 4.dp, vertical = 10.dp)
     ) {
@@ -4464,7 +4980,11 @@ private fun UpdateNoticeDialog(
     } else {
         "岱宗盒子 v${entries.first().first}（含 ${entries.size} 次更新）"
     }
-    OverlayBottomSheet(
+    // 用 WindowBottomSheet 而不是 OverlayBottomSheet：本弹窗由 AppNavigation 直接调用，
+    // 那一层**没有任何 Scaffold**（NavHost 也在同层），而 Overlay* 要靠 Scaffold 提供的
+    // LocalDialogStates 宿主才会被渲染 —— 否则注册进空列表，静默不显示。
+    // 后果是「发现新版本」和「更新说明」用户根本看不到。改用自带独立 Window 的变体。
+    WindowBottomSheet(
         show = show.value,
         title = title,
         onDismissRequest = onDismiss
@@ -4554,7 +5074,11 @@ fun AutoUpdateDialog(
         onDismiss()
     }
 
-    OverlayBottomSheet(
+    // 用 WindowBottomSheet 而不是 OverlayBottomSheet：本弹窗由 AppNavigation 直接调用，
+    // 那一层**没有任何 Scaffold**（NavHost 也在同层），而 Overlay* 要靠 Scaffold 提供的
+    // LocalDialogStates 宿主才会被渲染 —— 否则注册进空列表，静默不显示。
+    // 后果是「发现新版本」和「更新说明」用户根本看不到。改用自带独立 Window 的变体。
+    WindowBottomSheet(
         show = show.value,
         title = "发现新版本 v$version",
         onDismissRequest = {

@@ -180,7 +180,9 @@ fun CampusCardScreen(
                         }).distinctBy { "${it.time}|${it.merchant}|${it.amount}|${it.balance}|${it.description}" }
                             .sortedByDescending { it.time }
                     } else {
-                        api.getAllTransactions(startDate, endDate, maxPages = 50)
+                        // 冷启动（无缓存）不做全量拉取：12 页（600 条）足够覆盖常规区间的
+                        // 分析与展示，更早出内容；更久远的流水由"加载更多"按需分页。
+                        api.getAllTransactions(startDate, endDate, maxPages = 12)
                     }
                 }
                 applyTransactions(allTx)

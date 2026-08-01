@@ -627,9 +627,11 @@ class ScheduleApi(private val site: SiteSession) {
         val parts = current.split("-")
         var y1 = parts[0].toInt(); var y2 = parts[1].toInt(); var s = parts[2].toInt()
         val terms = mutableListOf<String>()
+        // 学期在同一学年内按 1(秋)→2(春)→3(短学期) 顺序递增；退回上一学期则反向。
+        // s=1 时上一学期是前一学年的 3；s=2/3 时上一学期是同学年的 s-1。
         repeat(8) {
             terms.add("$y1-$y2-$s")
-            if (s == 1) { y1--; y2--; s = 2 } else { s = 1 }
+            if (s == 1) { y1--; y2--; s = 3 } else { s-- }
         }
         return terms
     }

@@ -21,6 +21,24 @@ import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.squircle.squircleSurface
 import top.yukonga.miuix.kmp.utils.SinkFeedback
 
+/**
+ * 页面层级用色，解决"灰卡片踩灰背景"。
+ *
+ * miuix 的 Scaffold 默认背景是 `surface`（浅 #F7F7F7 / 深 纯黑），所以：
+ * - 卡片**不能**用 `surface`——那正是背景色，卡片会整个消失（考勤流水卡就是这么没的）；
+ * - 也不该用 `secondaryContainer.copy(alpha=...)`：浅色下 #F0F0F0 半透明压在 #F7F7F7 上
+ *   几乎无差，深色下 #434343 半透明又发灰，这是思源学堂"劣质网页感"的来源。
+ *
+ * 正确的层级是：背景 `surface` → 卡片 [AppCardColor] → 卡内嵌套块 [AppInsetColor]。
+ * `surfaceVariant` 在浅色是纯白、深色是 #242424，与背景两端都拉得开。
+ */
+val AppCardColor: Color
+    @Composable get() = top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme.surfaceVariant
+
+/** 卡片内部再嵌一层时用（比卡片略重），例如统计块、内嵌列表行。 */
+val AppInsetColor: Color
+    @Composable get() = top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.5f)
+
 @Composable
 fun AmbientGlow(
     color: Color,

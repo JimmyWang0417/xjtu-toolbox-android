@@ -209,9 +209,18 @@ class CampusCardApi(private val site: SiteSession) {
                     getTransactions(startDate, endDate, page, 50).second
                 }
             }
-            return firstPage + futures.flatMap { it.get() }
+            // 单页失败（瞬时网络/会话抖动）只丢该页，不拖垮整次加载——
+            // 首页已成功，部分数据可用远好于整页"卡死→报错"。
+            return firstPage + futures.flatMap { future ->
+                try {
+                    future.get(45, java.util.concurrent.TimeUnit.SECONDS)
+                } catch (e: Exception) {
+                    Log.w(TAG, "getAllTransactions: page fetch dropped: ${e.message}")
+                    emptyList()
+                }
+            }
         } finally {
-            executor.shutdown()
+            executor.shutdownNow()
         }
     }
 

@@ -39,7 +39,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.shape.CircleShape
+
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -154,22 +154,19 @@ private fun BuildingSelectionTile(
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
+    // 原来手绘了一圈蓝色 border + 自绘圆点勾选，不是 miuix 原生语言。
+    // 改用 miuix 原生 Checkbox 表达多选状态，去掉描边，选中态只靠底色区分。
     val shape = RoundedCornerShape(14.dp)
     val containerColor = if (selected) {
-        MiuixTheme.colorScheme.primary.copy(alpha = 0.14f)
+        MiuixTheme.colorScheme.tertiaryContainer
     } else {
         MiuixTheme.colorScheme.surfaceVariant
     }
-    val contentColor = if (selected) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurface
+    val contentColor = if (selected) MiuixTheme.colorScheme.onTertiaryContainer else MiuixTheme.colorScheme.onSurface
     Surface(
         modifier = modifier
             .heightIn(min = 48.dp)
             .clip(shape)
-            .border(
-                width = 1.dp,
-                color = if (selected) MiuixTheme.colorScheme.primary.copy(alpha = 0.32f) else Color.Transparent,
-                shape = shape
-            )
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = SinkFeedback(),
@@ -179,23 +176,15 @@ private fun BuildingSelectionTile(
         color = containerColor
     ) {
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier
-                    .size(24.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (selected) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.secondary.copy(alpha = 0.45f)
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                if (selected) {
-                    Icon(Icons.Default.Check, null, Modifier.size(15.dp), tint = MiuixTheme.colorScheme.onPrimary)
-                }
-            }
-            Spacer(Modifier.width(8.dp))
+            top.yukonga.miuix.kmp.basic.Checkbox(
+                state = if (selected) androidx.compose.ui.state.ToggleableState.On
+                    else androidx.compose.ui.state.ToggleableState.Off,
+                onClick = onClick
+            )
+            Spacer(Modifier.width(4.dp))
             Text(
                 text,
                 style = MiuixTheme.textStyles.body2,
@@ -621,7 +610,7 @@ fun EmptyRoomScreen(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = SinkFeedback()
                     ) { showFilterSheet.value = true },
-                colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.secondaryContainer)
+                colors = CardDefaults.defaultColors(color = com.xjtu.toolbox.ui.components.AppCardColor)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -738,7 +727,9 @@ fun EmptyRoomScreen(
 
             OverlayBottomSheet(
                 show = showFilterSheet.value,
-                title = "筛选空闲教室",
+                // 弹窗里实际只有"选校区 + 选教学楼"两件事（下面注释自己也写明了），
+                // "筛选空闲教室"这个标题范围太大、容易让人以为还能选时间/节次，改成准确的"选择教学楼"
+                title = "选择教学楼",
                 onDismissRequest = { showFilterSheet.value = false }
             ) {
                 Column(
@@ -811,19 +802,9 @@ fun EmptyRoomScreen(
 
                     // 日期 / 空闲节次 / 快捷筛选已在主页面卡片提供，弹窗内不再重复（避免与页面控件重叠）。
                     // 本弹窗只负责「选校区 + 选教学楼」。
+                    // 底部"查看 x 间教室"按钮已删——弹窗本身支持拖拽关闭和点外部关闭，
+                    // 选完即生效（结果实时反映在下面的列表），这个按钮不点开也照样生效，纯粹多余。
                     Spacer(Modifier.height(12.dp))
-                    Button(
-                        onClick = { showFilterSheet.value = false },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            when {
-                                isLoading && rooms.isEmpty() -> "正在查询，先完成选择"
-                                isLoading -> "查看已加载 ${displayRooms.size} 间（更新中）"
-                                else -> "查看 ${displayRooms.size} 间教室"
-                            }
-                        )
-                    }
                 }
             }
 
