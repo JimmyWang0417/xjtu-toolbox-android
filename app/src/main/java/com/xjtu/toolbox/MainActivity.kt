@@ -1425,7 +1425,13 @@ fun AppNavigation(
             loginState.sessionManager?.getSiteOrNull("dzpz")?.let { com.xjtu.toolbox.dzpz.TranscriptScreen(site = it, onBack = { navController.popBackStack() }) } ?: LaunchedEffect(Unit) { navController.popBackStack() }
         }
         composable(Routes.VENUE) {
-            loginState.sessionManager?.getSiteOrNull("venue")?.let { com.xjtu.toolbox.venue.VenueScreen(site = it, onBack = { navController.popBackStack() }) } ?: LaunchedEffect(Unit) { navController.popBackStack() }
+            loginState.sessionManager?.getSiteOrNull("venue")?.let {
+                com.xjtu.toolbox.venue.VenueScreen(
+                    site = it,
+                    credentialStore = credentialStore,
+                    onBack = { navController.popBackStack() }
+                )
+            } ?: LaunchedEffect(Unit) { navController.popBackStack() }
         }
         composable(Routes.CLASS_REPLAY) {
             loginState.sessionManager?.getSiteOrNull("class")?.let { classSite ->

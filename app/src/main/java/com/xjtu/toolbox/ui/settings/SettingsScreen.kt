@@ -116,6 +116,7 @@ fun SettingsScreen(
     var autoCheckUpdate by remember { mutableStateOf(credentialStore.autoCheckUpdate) }
     var updateChannel by remember { mutableStateOf(credentialStore.updateChannel) }
     var accountType by remember { mutableStateOf(credentialStore.accountType) }
+    var venueAutoSolveCaptcha by remember { mutableStateOf(credentialStore.venueAutoSolveCaptchaEnabled) }
     var theme by remember { mutableStateOf(homeTheme) }
     var cacheSizeText by remember { mutableStateOf("计算中...") }
     var showChangelog by remember { mutableStateOf(false) }
@@ -418,6 +419,25 @@ fun SettingsScreen(
                         }
                     }
                 }
+            }
+
+            // ── 场馆 ──
+            SmallTitle("场馆")
+            SettingsCard {
+                SwitchPreference(
+                    title = "自动识别场馆验证码",
+                    summary = if (venueAutoSolveCaptcha) {
+                        "预约时先尝试自动识别，失败后可手动滑动"
+                    } else {
+                        "已关闭，预约时始终手动滑动（推荐）"
+                    },
+                    checked = venueAutoSolveCaptcha,
+                    startAction = { SettingsIcon(MiuixIcons.Settings, cIndigo) },
+                    onCheckedChange = {
+                        venueAutoSolveCaptcha = it
+                        credentialStore.venueAutoSolveCaptchaEnabled = it
+                    }
+                )
             }
 
             // ── 数据 ──

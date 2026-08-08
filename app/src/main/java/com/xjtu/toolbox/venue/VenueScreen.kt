@@ -40,9 +40,11 @@ import androidx.compose.ui.unit.dp
 import com.xjtu.toolbox.ui.components.EmptyState
 import com.xjtu.toolbox.ui.components.ErrorState
 import com.xjtu.toolbox.ui.components.LoadingState
+import com.xjtu.toolbox.util.CredentialStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.cancellation.CancellationException
 import top.yukonga.miuix.kmp.basic.*
 import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
@@ -57,7 +59,11 @@ import java.time.format.DateTimeFormatter
  * 流程：场馆列表 → 选择场馆 → 日期选择 + 时段网格 → 确认 → 滑动验证码 → 预订结果
  */
 @Composable
-fun VenueScreen(site: SiteSession, onBack: () -> Unit) {
+fun VenueScreen(
+    site: SiteSession,
+    credentialStore: CredentialStore,
+    onBack: () -> Unit
+) {
     val appLoginState = LocalAppLoginState.current
     val scope = rememberCoroutineScope()
     val api = remember(site) { VenueApi(site) }
@@ -101,6 +107,10 @@ fun VenueScreen(site: SiteSession, onBack: () -> Unit) {
     var captchaData by remember { mutableStateOf<VenueApi.CaptchaData?>(null) }
     var captchaLoading by remember { mutableStateOf(false) }
     var captchaError by remember { mutableStateOf<String?>(null) }
+    var captchaAutoSolving by remember { mutableStateOf(false) }
+    var captchaNotice by remember { mutableStateOf<String?>(null) }
+    // 每次加载/关闭验证码都递增，丢弃旧协程返回的结果，避免换图后旧识别结果误提交。
+    var captchaRequestToken by remember { mutableIntStateOf(0) }
     val showResultDialog = remember { mutableStateOf(false) }
 
     // ─── 加载函数 ───
@@ -137,6 +147,11 @@ fun VenueScreen(site: SiteSession, onBack: () -> Unit) {
     fun doBooking(sliderResult: SliderResult) {
         val order = pendingOrder ?: return
         val captcha = captchaData ?: return
+        if (bookingInProgress) return
+        // 自动识别协程此时已经完成；让任何仍在运行的旧加载协程失效。
+        captchaRequestToken++
+        captchaLoading = false
+        captchaAutoSolving = false
         bookingInProgress = true
         scope.launch {
             try {
@@ -151,6 +166,8 @@ fun VenueScreen(site: SiteSession, onBack: () -> Unit) {
                 bookingResult = result
                 showCaptchaDialog.value = false
                 showResultDialog.value = true
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 bookingResult = VenueApi.BookingResult(false, message = e.message ?: "预订失败")
                 showCaptchaDialog.value = false
@@ -160,13 +177,43 @@ fun VenueScreen(site: SiteSession, onBack: () -> Unit) {
     }
 
     /**
-     * 确认预订：先拿服务端 _param（prepareOrder），再拿滑块验证码，交给用户手动滑动。
-     *
-     * 这里**不做自动解题**。曾经的实现会用 Sobel 边缘模板匹配算出缺口位置、生成仿人轨迹
-     * 直接提交，成功时用户从头到尾看不到滑块——界面只是个转圈的弹窗，主观感受就是
-     * "点了确定预约没反应"，而一旦算错，用户连自己滑一次的机会都没有，直接收到预约失败。
-     * 现在一律由用户自己滑。
+     * 把验证码交给自动识别器；自动识别是设置项，默认关闭。
+     * 识别失败只显示提示并保留当前验证码，用户仍可直接手动滑动。
      */
+    suspend fun processCaptcha(
+        data: VenueApi.CaptchaData,
+        requestToken: Int,
+        autoSolve: Boolean
+    ) {
+        if (requestToken != captchaRequestToken || !showCaptchaDialog.value) return
+        captchaData = data
+        captchaNotice = null
+        if (!autoSolve) return
+
+        captchaAutoSolving = true
+        val solved = try {
+            withContext(Dispatchers.Default) { VenueCaptchaSolver.solve(data) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("VenueScreen", "automatic captcha solving failed", e)
+            null
+        }
+        if (requestToken != captchaRequestToken || !showCaptchaDialog.value) return
+
+        captchaAutoSolving = false
+        if (solved == null) {
+            captchaNotice = "自动识别未通过，请手动滑动滑块"
+        } else {
+            android.util.Log.d(
+                "VenueScreen",
+                "automatic captcha solve succeeded: target=${solved.targetX}, " +
+                    "confidence=${"%.3f".format(solved.confidence)}"
+            )
+            doBooking(solved.sliderResult)
+        }
+    }
+
     fun startBookingFlow() {
         val venue = selectedVenue
         if (venue == null) {
@@ -175,37 +222,81 @@ fun VenueScreen(site: SiteSession, onBack: () -> Unit) {
         }
         android.util.Log.d("VenueScreen", "startBookingFlow: venue=${venue.id} slots=${selectedSlots.size}")
         showCaptchaDialog.value = true
-        captchaLoading = true; captchaError = null; pendingOrder = null; captchaData = null
+        val requestToken = captchaRequestToken + 1
+        captchaRequestToken = requestToken
+        val autoSolve = credentialStore.venueAutoSolveCaptchaEnabled
+        captchaLoading = true
+        captchaAutoSolving = false
+        captchaError = null
+        captchaNotice = null
+        pendingOrder = null
+        captchaData = null
         scope.launch {
             try {
                 val order = withContext(Dispatchers.IO) {
                     api.prepareOrder(venue.id, selectedSlots.toList())
                 }
+                if (requestToken != captchaRequestToken || !showCaptchaDialog.value) return@launch
                 pendingOrder = order
                 android.util.Log.d("VenueScreen", "startBookingFlow: prepareOrder ok")
 
-                captchaData = withContext(Dispatchers.IO) { api.generateCaptcha(venue.id) }
-                android.util.Log.d("VenueScreen", "startBookingFlow: captcha ready id=${captchaData?.id}")
+                val data = withContext(Dispatchers.IO) { api.generateCaptcha(venue.id) }
+                processCaptcha(data, requestToken, autoSolve)
+                android.util.Log.d("VenueScreen", "startBookingFlow: captcha ready id=${data.id}")
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: AuthExpiredException) {
-                showCaptchaDialog.value = false
-                appLoginState.handleAuthExpired(LoginType.VENUE, Routes.VENUE, onBack)
+                if (requestToken == captchaRequestToken) {
+                    showCaptchaDialog.value = false
+                    captchaRequestToken++
+                    appLoginState.handleAuthExpired(LoginType.VENUE, Routes.VENUE, onBack)
+                }
             } catch (e: Exception) {
-                android.util.Log.e("VenueScreen", "startBookingFlow failed", e)
-                captchaError = e.message ?: "获取验证码失败"
-            } finally { captchaLoading = false }
+                if (requestToken == captchaRequestToken) {
+                    android.util.Log.e("VenueScreen", "startBookingFlow failed", e)
+                    captchaError = e.message ?: "获取验证码失败"
+                }
+            } finally {
+                if (requestToken == captchaRequestToken) {
+                    captchaLoading = false
+                    captchaAutoSolving = false
+                }
+            }
         }
     }
 
     fun loadCaptcha() {
         val venue = selectedVenue ?: return
-        captchaLoading = true; captchaError = null
+        val requestToken = captchaRequestToken + 1
+        captchaRequestToken = requestToken
+        val autoSolve = credentialStore.venueAutoSolveCaptchaEnabled
+        captchaLoading = true
+        captchaAutoSolving = false
+        captchaError = null
+        captchaNotice = null
+        captchaData = null
         scope.launch {
             try {
                 val data = withContext(Dispatchers.IO) { api.generateCaptcha(venue.id) }
-                captchaData = data
+                processCaptcha(data, requestToken, autoSolve)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: AuthExpiredException) {
+                if (requestToken == captchaRequestToken) {
+                    showCaptchaDialog.value = false
+                    captchaRequestToken++
+                    appLoginState.handleAuthExpired(LoginType.VENUE, Routes.VENUE, onBack)
+                }
             } catch (e: Exception) {
-                captchaError = e.message ?: "获取验证码失败"
-            } finally { captchaLoading = false }
+                if (requestToken == captchaRequestToken) {
+                    captchaError = e.message ?: "获取验证码失败"
+                }
+            } finally {
+                if (requestToken == captchaRequestToken) {
+                    captchaLoading = false
+                    captchaAutoSolving = false
+                }
+            }
         }
     }
 
@@ -356,12 +447,20 @@ fun VenueScreen(site: SiteSession, onBack: () -> Unit) {
 
         // ─── 验证码弹窗 ───
         if (showCaptchaDialog.value) {
-            BackHandler { showCaptchaDialog.value = false }
+            BackHandler {
+                showCaptchaDialog.value = false
+                captchaRequestToken++
+                captchaLoading = false
+                captchaAutoSolving = false
+            }
             OverlayDialog(
                 title = "滑动验证",
                 show = showCaptchaDialog.value,
                 onDismissRequest = {
                     showCaptchaDialog.value = false
+                    captchaRequestToken++
+                    captchaLoading = false
+                    captchaAutoSolving = false
                 }
             ) {
                 Column(
@@ -369,11 +468,21 @@ fun VenueScreen(site: SiteSession, onBack: () -> Unit) {
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     when {
+                        bookingInProgress -> {
+                            Spacer(Modifier.height(32.dp))
+                            CircularProgressIndicator()
+                            Spacer(Modifier.height(8.dp))
+                            Text("正在预订...", style = MiuixTheme.textStyles.body2)
+                            Spacer(Modifier.height(32.dp))
+                        }
                         captchaLoading -> {
                             Spacer(Modifier.height(32.dp))
                             CircularProgressIndicator()
                             Spacer(Modifier.height(8.dp))
-                            Text("加载验证码...", style = MiuixTheme.textStyles.body2)
+                            Text(
+                                if (captchaAutoSolving) "正在自动识别验证码..." else "加载验证码...",
+                                style = MiuixTheme.textStyles.body2
+                            )
                             Spacer(Modifier.height(32.dp))
                         }
                         captchaError != null -> {
@@ -381,7 +490,15 @@ fun VenueScreen(site: SiteSession, onBack: () -> Unit) {
                             Spacer(Modifier.height(12.dp))
                             Button(onClick = { startBookingFlow() }) { Text("重试") }
                         }
-                        captchaData != null && !bookingInProgress -> {
+                        captchaData != null -> {
+                            captchaNotice?.let { notice ->
+                                Text(
+                                    notice,
+                                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                                    style = MiuixTheme.textStyles.footnote1
+                                )
+                                Spacer(Modifier.height(8.dp))
+                            }
                             SliderCaptchaView(
                                 backgroundImageBase64 = captchaData!!.backgroundImage,
                                 sliderImageBase64 = captchaData!!.sliderImage,
@@ -393,13 +510,6 @@ fun VenueScreen(site: SiteSession, onBack: () -> Unit) {
                             )
                             Spacer(Modifier.height(8.dp))
                             TextButton(text = "换一张", onClick = { loadCaptcha() })
-                        }
-                        bookingInProgress -> {
-                            Spacer(Modifier.height(32.dp))
-                            CircularProgressIndicator()
-                            Spacer(Modifier.height(8.dp))
-                            Text("正在预订...", style = MiuixTheme.textStyles.body2)
-                            Spacer(Modifier.height(32.dp))
                         }
                     }
                 }
@@ -592,9 +702,10 @@ private fun VenueCard(
                     style = MiuixTheme.textStyles.body1,
                     fontWeight = FontWeight.Medium
                 )
-                if (!venue.address.isNullOrBlank()) {
+                val address = venue.address
+                if (!address.isNullOrBlank()) {
                     Text(
-                        venue.address,
+                        address,
                         style = MiuixTheme.textStyles.body2,
                         color = MiuixTheme.colorScheme.onSurfaceVariantActions
                     )

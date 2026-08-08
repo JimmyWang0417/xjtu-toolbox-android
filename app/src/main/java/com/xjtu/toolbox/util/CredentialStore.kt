@@ -243,6 +243,16 @@ class CredentialStore(context: Context) {
         get() = appPrefs.getBoolean(KEY_SHOW_QUICK_ACTIONS, true)
         set(value) { appPrefs.edit().putBoolean(KEY_SHOW_QUICK_ACTIONS, value).apply() }
 
+    /**
+     * 场馆滑块验证码自动识别开关。
+     *
+     * 默认关闭：自动识别属于实验性能力，识别置信度不足时仍会回退到手动滑块，
+     * 用户明确打开后才会在预约流程中尝试自动提交。
+     */
+    var venueAutoSolveCaptchaEnabled: Boolean
+        get() = appPrefs.getBoolean(KEY_VENUE_AUTO_SOLVE_CAPTCHA, false)
+        set(value) { appPrefs.edit().putBoolean(KEY_VENUE_AUTO_SOLVE_CAPTCHA, value).apply() }
+
     companion object {
         private const val KEY_USERNAME = "username"
         private const val KEY_PASSWORD = "password"
@@ -273,6 +283,7 @@ class CredentialStore(context: Context) {
         private const val KEY_RECENT_SITES = "recent_site_keys"
         private const val MAX_RECENT_SITES = 4
         private const val KEY_SHOW_QUICK_ACTIONS = "show_quick_actions"
+        private const val KEY_VENUE_AUTO_SOLVE_CAPTCHA = "venue_auto_solve_captcha"
 
         // ── 设置值常量 ──
         const val NAV_STYLE_FLOATING = "floating"

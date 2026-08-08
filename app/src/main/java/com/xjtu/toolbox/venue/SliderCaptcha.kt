@@ -72,6 +72,10 @@ fun SliderCaptchaView(
     sliderOriginalHeight: Int,
     onSlideComplete: (SliderResult) -> Unit
 ) {
+    // pointerInput(Unit) 的手势协程会跨重组存活；换一张验证码后必须调用最新回调，
+    // 否则旧闭包可能拿着上一张验证码的 id 提交。
+    val currentOnSlideComplete by rememberUpdatedState(onSlideComplete)
+
     // 解码图片
     val bgBitmap = remember(backgroundImageBase64) {
         decodeBase64Image(backgroundImageBase64)
@@ -246,7 +250,7 @@ fun SliderCaptchaView(
                                     trackList = trackPoints.toList()
                                 )
                                 Log.d(TAG, "Slide complete: displayX=$displayX, points=${trackPoints.size}")
-                                onSlideComplete(result)
+                                currentOnSlideComplete(result)
                             },
                             onDragCancel = {
                                 isDragging = false

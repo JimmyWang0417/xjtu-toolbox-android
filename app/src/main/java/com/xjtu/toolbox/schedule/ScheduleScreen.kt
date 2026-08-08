@@ -97,8 +97,8 @@ import com.xjtu.toolbox.ui.components.ErrorState
 import com.xjtu.toolbox.widget.ScheduleWidgetUpdater
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
 import java.time.LocalDate
 import java.time.temporal.ChronoUnit
@@ -315,7 +315,10 @@ fun ScheduleScreen(
                     }
 
                     try {
-                        coroutineScope {
+                        // 课表是主数据；考试、开学日期、学期列表和节假日都是可降级的附属数据。
+                        // 使用 supervisorScope，避免其中一个附属接口的瞬时失败把“合法的空课表”
+                        // 一起判成网络失败（首次打开显示错误、点击重试后才显示空状态）。
+                        supervisorScope {
                             val coursesDeferred = async { api.getSchedule(termCode) }
                             val examsDeferred = async { api.getExamSchedule(termCode) }
                             val startDateDeferred = async {
@@ -327,9 +330,24 @@ fun ScheduleScreen(
                             val holidaysDeferred = async {
                                 try { HolidayApi.getHolidayDates(context, forceRefresh = true) } catch (_: Exception) { emptyMap() }
                             }
+                            // 保留曾经成功获取过的学期，避免教务端本次只返回当前学期或暂时空响应时，
+                            // 把已可用的下学期选项从 UI 中抹掉。
+                            val cachedTermCodes = dataCache.get("schedule_term_list", Long.MAX_VALUE)
+                                ?.let { json ->
+                                    try { gson.fromJson(json, Array<String>::class.java).toList() }
+                                    catch (_: Exception) { emptyList() }
+                                }
+                                .orEmpty()
 
                             val freshCourses = coursesDeferred.await()
-                            val freshExams = examsDeferred.await()
+                            val freshExams = try {
+                                examsDeferred.await()
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                android.util.Log.w("ScheduleUI", "getExamSchedule failed; keeping cached/empty exams", e)
+                                exams
+                            }
                             val startDate = startDateDeferred.await()
                             val fetchedTermList = termListDeferred.await()
                             val freshHolidays = holidaysDeferred.await()
@@ -348,10 +366,11 @@ fun ScheduleScreen(
                             holidayDates = freshHolidays
                             showingStaleData = false
                             isRefreshingFromNetwork = false
-                            if (fetchedTermList.isNotEmpty()) {
-                                termList = fetchedTermList
+                            val availableTerms = (fetchedTermList + cachedTermCodes).distinct()
+                            if (availableTerms.isNotEmpty()) {
+                                termList = availableTerms
                                 // 缓存学期列表（离线时使用）
-                                try { dataCache.put("schedule_term_list", gson.toJson(fetchedTermList)) } catch (_: Exception) {}
+                                try { dataCache.put("schedule_term_list", gson.toJson(availableTerms)) } catch (_: Exception) {}
                             }
 
                             try { dataCache.put("schedule_$termCode", gson.toJson(freshCourses)) } catch (_: Exception) {}
