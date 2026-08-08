@@ -25,6 +25,14 @@ object AppChangelog {
      * 新增版本只在最前面追加即可。
      */
     val ENTRIES: List<Pair<String, VersionChangelog>> = listOf(
+        "4.5.3" to VersionChangelog(
+            items = listOf(
+                "🧾" to "场馆新增「我的订单」：支持分页查看订单、查看详情与刷新/错误重试",
+                "↩️" to "支持在订单页取消预订，并显示订单状态和退款提示",
+                "💳" to "新增浏览器登录引导与支付入口，预约成功后可直接继续支付",
+                "✅" to "预约提交前增加确认步骤，避免误选时段直接发起验证码验证"
+            )
+        ),
         "4.5.2" to VersionChangelog(
             items = listOf(
                 "🏟️" to "场馆预约支持可选的验证码自动识别，默认关闭，识别失败可继续手动滑动",

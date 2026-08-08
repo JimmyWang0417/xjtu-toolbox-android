@@ -2,9 +2,13 @@ package com.xjtu.toolbox.venue
 
 import android.util.Log
 import com.google.gson.Gson
+import com.google.gson.JsonArray
+import com.google.gson.JsonElement
 import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 import com.xjtu.toolbox.auth.AuthExpiredException
 import com.xjtu.toolbox.auth.SiteSession
+import com.xjtu.toolbox.auth.VenueLogin
 import com.xjtu.toolbox.auth.XJTULogin
 import kotlinx.coroutines.runBlocking
 import okhttp3.FormBody
@@ -47,6 +51,13 @@ class VenueApi(private val site: SiteSession) {
     companion object {
         private const val TAG = "VenueApi"
         private const val BASE = "http://202.117.17.144"
+        /**
+         * 订单页由系统浏览器打开。支付页会继续使用当前站点的 CAS 会话，
+         * 因而不能把 Android App 内的 Cookie 生硬地拼进 URL。
+         */
+        const val PAYMENT_BASE = BASE
+        const val BROWSER_LOGIN_URL = VenueLogin.VENUE_OAUTH_URL
+        private const val MAX_ORDER_PAGES = 100
         private val gson = Gson()
 
         // order/show.html 返回页面里嵌入的 `var _param=eval({...});var _booked=eval`
@@ -116,6 +127,60 @@ class VenueApi(private val site: SiteSession) {
         val message: String = ""
     )
 
+    /** 一个订单明细（一个日期/时段/场地）。 */
+    data class OrderDetail(
+        val date: String,
+        val timeSlot: String,
+        val areaName: String,
+        val price: Double,
+        val serviceId: String,
+        val serviceName: String
+    )
+
+    /** 订单信息。状态值与场馆服务端保持一致：0 预订中、1 预订成功、2 预订取消。 */
+    data class OrderInfo(
+        val orderId: String,
+        val status: Int,
+        val createdAt: String,
+        val price: Double,
+        val details: List<OrderDetail>
+    ) {
+        val statusText: String
+            get() = when (status) {
+                0 -> "预订中"
+                1 -> "预订成功"
+                2 -> "预订取消"
+                else -> "未知状态($status)"
+            }
+
+        val venueName: String
+            get() = details.firstOrNull { it.serviceName.isNotBlank() }?.serviceName.orEmpty()
+
+        val firstDate: String
+            get() = details.firstOrNull()?.date.orEmpty()
+
+        /** 待支付订单可直接唤起支付引导。 */
+        val canPay: Boolean get() = status == 0
+
+        /** 服务端允许对预订中/预订成功订单发起取消。 */
+        val canCancel: Boolean get() = status == 0 || status == 1
+    }
+
+    /** 订单分页响应。服务端不同部署可能返回数组或带 rows/object 的对象，统一成此模型。 */
+    data class OrderPage(
+        val orders: List<OrderInfo>,
+        val page: Int,
+        val pageSize: Int,
+        val total: Int? = null,
+        val hasMore: Boolean = false
+    )
+
+    /** 取消订单/其它订单操作的统一结果。 */
+    data class OrderActionResult(
+        val success: Boolean,
+        val message: String
+    )
+
     private data class TimeSlotInfo(
         val timeNo: String,
         val stockId: Long,
@@ -162,7 +227,7 @@ class VenueApi(private val site: SiteSession) {
 
         Log.d(TAG, "fetchVenueList: ${venues.size} venues found")
         if (venues.isEmpty()) {
-            Log.w(TAG, "fetchVenueList: empty, title=${doc.title()}, body=${doc.body()?.text()?.take(300)}")
+            Log.w(TAG, "fetchVenueList: empty, title=${doc.title()}, body=${doc.body().text().take(300)}")
             throw RuntimeException("场馆列表为空或页面结构已变化，请稍后重试")
         }
         return venues
@@ -418,7 +483,7 @@ class VenueApi(private val site: SiteSession) {
             // shopping.js 里 result=="1" 直接完成（免支付/已扣款），result=="2"
             // 需要跳转支付页——两种都算「预订成功」，只是后续动作不同。
             if ((result == "1" || result == "2") && !orderId.isNullOrBlank()) {
-                val price = obj?.get("price")?.takeIf { !it.isJsonNull }?.asDouble ?: 0.0
+                val price = obj.get("price")?.takeIf { !it.isJsonNull }?.asDouble ?: 0.0
                 val needsPay = result == "2"
                 BookingResult(
                     success = true,
@@ -437,4 +502,247 @@ class VenueApi(private val site: SiteSession) {
             BookingResult(false, message = "预订失败: ${e.message}")
         }
     }
+
+    // ─── 订单 ─────────────────────────────────────────────────────────
+
+    /**
+     * 分页查询「我的订单」。
+     *
+     * PR #54 使用过带 `/web` 前缀的旧部署地址；当前移动端场馆站点的实际
+     * contextPath 是根路径，因此这里按现有抓包使用 `/yyuser/...`。响应在
+     * 不同版本服务端上既可能是 JSON 数组，也可能包在 `rows`/`object` 中，
+     * 解析器会统一兼容。
+     */
+    fun fetchOrders(page: Int = 1, pageSize: Int = 20): OrderPage {
+        require(page >= 1) { "订单页码必须从 1 开始" }
+        require(pageSize in 1..100) { "订单分页大小无效" }
+
+        val url = "$BASE/yyuser/searchorder.html" +
+            "?page=$page&rows=$pageSize&status=&iscomment=" +
+            "&stockSDate=&stockEDate=&_=${System.currentTimeMillis()}"
+        val response = execute(ajaxRequest(url, "$BASE/yyuser/searchorder.html"))
+        val body = response.body?.string().orEmpty()
+        val code = response.code
+        response.close()
+
+        if (code !in 200..299) {
+            throw RuntimeException("加载订单失败（HTTP $code）")
+        }
+        if (XJTULogin.isAuthFailureResponse(body)) {
+            throw AuthExpiredException("体育场馆")
+        }
+        // 没有订单时服务端会返回空数组；空 body 也按空页处理，避免把「暂无订单」
+        // 错误地显示成网络故障。
+        if (body.isBlank()) return OrderPage(emptyList(), page, pageSize, total = 0, hasMore = false)
+
+        return parseOrderPage(body, page, pageSize)
+    }
+
+    /** 与旧客户端命名保持兼容，供其它入口按需读取单页订单。 */
+    fun getOrders(page: Int = 1, pageSize: Int = 20): OrderPage =
+        fetchOrders(page, pageSize)
+
+    /** 拉取全部订单；保留分页 API 供页面按需加载。 */
+    fun fetchAllOrders(pageSize: Int = 20): List<OrderInfo> {
+        val result = mutableListOf<OrderInfo>()
+        var page = 1
+        while (page <= MAX_ORDER_PAGES) {
+            val current = fetchOrders(page, pageSize)
+            result += current.orders
+            if (!current.hasMore || current.orders.isEmpty()) break
+            page++
+        }
+        return result.sortedWith(
+            compareByDescending<OrderInfo> { it.createdAt.ifBlank { "0000-00-00 00:00:00" } }
+                .thenByDescending { it.orderId }
+        )
+    }
+
+    /** 取消订单。服务端成功码通常是 `1`，同时兼容旧部署的布尔/文本返回值。 */
+    fun cancelOrder(orderId: String): OrderActionResult {
+        require(orderId.isNotBlank()) { "订单号不能为空" }
+        val form = FormBody.Builder()
+            .add("orderid", orderId)
+            .add("json", "true")
+            .build()
+        val response = execute(
+            ajaxRequest("$BASE/order/delorder.html", "$BASE/yyuser/searchorder.html")
+                .post(form)
+        )
+        val body = response.body?.string().orEmpty()
+        val code = response.code
+        response.close()
+
+        if (code !in 200..299) {
+            return OrderActionResult(false, "取消订单失败（HTTP $code）")
+        }
+        if (XJTULogin.isAuthFailureResponse(body)) {
+            throw AuthExpiredException("体育场馆")
+        }
+
+        val root = runCatching { JsonParser.parseString(body) }.getOrNull()
+        val obj = root?.takeIf { it.isJsonObject }?.asJsonObject
+        val result = readString(obj, "result", "code", "success").orEmpty().lowercase()
+        val message = readString(obj, "message", "msg", "notice")
+            ?.takeIf { it.isNotBlank() }
+            ?: if (result in setOf("1", "true", "success", "ok")) "取消成功" else "取消失败"
+        val success = result in setOf("1", "true", "success", "ok") ||
+            (result == "100" && message.contains("成功"))
+        return OrderActionResult(success, message)
+    }
+
+    /** 支付页面 URL（订单支付需要在系统浏览器中完成 CAS 会话接力）。 */
+    fun paymentUrl(orderId: String): String =
+        "$PAYMENT_BASE/pay/show.html?id=${java.net.URLEncoder.encode(orderId, Charsets.UTF_8.name())}"
+
+    /** PR #54 中使用的命名别名。 */
+    fun payUrl(orderId: String): String = paymentUrl(orderId)
+
+    private fun parseOrderPage(body: String, page: Int, pageSize: Int): OrderPage {
+        val root = try {
+            JsonParser.parseString(body)
+        } catch (e: Exception) {
+            val text = Jsoup.parse(body).text().trim()
+            throw RuntimeException(text.takeIf { it.isNotBlank() } ?: "订单接口返回格式异常", e)
+        }
+
+        val array = findOrderArray(root)
+        if (array == null) {
+            // 某些部署在没有订单时返回 `{object:null}`，与空数组等价。
+            if (root.isJsonObject && root.asJsonObject.entrySet().all { it.value.isJsonNull }) {
+                return OrderPage(emptyList(), page, pageSize, total = 0, hasMore = false)
+            }
+            throw RuntimeException("订单接口返回格式异常")
+        }
+
+        val orders = array.mapNotNull { element ->
+            element.takeIf { it.isJsonObject }?.asJsonObject?.let(::parseOrder)
+        }.filter { it.orderId.isNotBlank() }
+        val total = findTotal(root)
+        val hasMore = total?.let { page * pageSize < it } ?: (orders.size >= pageSize)
+        return OrderPage(orders, page, pageSize, total, hasMore)
+    }
+
+    private fun parseOrder(item: JsonObject): OrderInfo {
+        val details = mutableListOf<OrderDetail>()
+        val detailsElement = firstElement(item, "orderdetail", "orderDetail", "details", "items")
+        val detailElements = when {
+            detailsElement?.isJsonArray == true -> detailsElement.asJsonArray.toList()
+            detailsElement?.isJsonObject == true -> listOf(detailsElement)
+            else -> emptyList()
+        }
+        detailElements.forEach { element ->
+            if (!element.isJsonObject) return@forEach
+            val detail = element.asJsonObject
+            val stock = firstElement(detail, "stock")?.asObjectOrNull()
+            val stockDetail = firstElement(detail, "stockdetail", "stockDetail")?.asObjectOrNull()
+            val service = firstElement(detail, "service", "venue", "product")?.asObjectOrNull()
+            details += OrderDetail(
+                date = readString(stock, "s_date", "sDate", "date", "stockSDate").orEmpty(),
+                timeSlot = readString(stock, "time_no", "timeNo", "time", "timeSlot").orEmpty(),
+                areaName = readString(stockDetail, "sname", "name", "areaName", "area").orEmpty(),
+                price = readDouble(detail, "price", "amount", "money"),
+                serviceId = readString(detail, "serviceid", "serviceId", "id").orEmpty(),
+                serviceName = readString(service, "name", "serviceName", "servicename").orEmpty()
+            )
+        }
+        return OrderInfo(
+            orderId = readString(item, "orderid", "orderId", "id").orEmpty(),
+            status = readInt(item, "status", "orderStatus", "state"),
+            createdAt = readString(item, "createdate", "createDate", "created_at", "orderDate").orEmpty(),
+            price = readDouble(item, "price", "amount", "money"),
+            details = details
+        )
+    }
+
+    /** 在数组/rows/object/data/list 等常见包装中寻找订单数组。 */
+    private fun findOrderArray(element: JsonElement?, depth: Int = 0): JsonArray? {
+        if (element == null || element.isJsonNull || depth > 4) return null
+        if (element.isJsonArray) {
+            val array = element.asJsonArray
+            // 空数组本身就是合法的「暂无订单」响应；非空数组则避免误把
+            // orderdetail/其它业务数组当成订单列表。
+            if (array.size() == 0 || array.any { candidate ->
+                    candidate.isJsonObject && firstElement(
+                        candidate.asJsonObject,
+                        "orderid", "orderId", "orderStatus", "createdate", "createDate"
+                    ) != null
+                }) return array
+            return array.asSequence()
+                .mapNotNull { child -> findOrderArray(child, depth + 1) }
+                .firstOrNull()
+        }
+        if (!element.isJsonObject) return null
+        val obj = element.asJsonObject
+        val preferred = listOf("object", "rows", "data", "list", "orders", "orderList")
+        preferred.forEach { key ->
+            val child = obj.get(key)
+            val found = findOrderArray(child, depth + 1)
+            if (found != null) return found
+        }
+        obj.entrySet().forEach { (_, child) ->
+            val found = findOrderArray(child, depth + 1)
+            if (found != null) return found
+        }
+        return null
+    }
+
+    private fun findTotal(element: JsonElement?, depth: Int = 0): Int? {
+        if (element == null || element.isJsonNull || depth > 3) return null
+        if (!element.isJsonObject) return null
+        val obj = element.asJsonObject
+        listOf("total", "totalCount", "records", "count").forEach { key ->
+            val value = obj.get(key)
+            if (value != null && !value.isJsonNull) {
+                readInt(value)?.let { return it }
+            }
+        }
+        listOf("object", "data", "result").forEach { key ->
+            findTotal(obj.get(key), depth + 1)?.let { return it }
+        }
+        return null
+    }
+
+    private fun firstElement(obj: JsonObject?, vararg keys: String): JsonElement? {
+        if (obj == null) return null
+        keys.forEach { key ->
+            val direct = obj.get(key)
+            if (direct != null && !direct.isJsonNull) return direct
+        }
+        obj.entrySet().forEach { (key, value) ->
+            if (!value.isJsonNull && keys.any { it.equals(key, ignoreCase = true) }) return value
+        }
+        return null
+    }
+
+    private fun readString(obj: JsonObject?, vararg keys: String): String? =
+        readString(firstElement(obj, *keys))
+
+    private fun readString(element: JsonElement?): String? {
+        if (element == null || element.isJsonNull) return null
+        return runCatching { element.asString }.getOrNull()?.trim()
+    }
+
+    private fun readInt(obj: JsonObject?, vararg keys: String): Int =
+        readInt(firstElement(obj, *keys)) ?: 0
+
+    private fun readInt(element: JsonElement?): Int? {
+        val raw = readString(element) ?: return null
+        return raw.toIntOrNull() ?: raw.toDoubleOrNull()?.toInt()
+    }
+
+    private fun readDouble(obj: JsonObject?, vararg keys: String): Double =
+        readDouble(firstElement(obj, *keys))
+
+    private fun readDouble(element: JsonElement?): Double {
+        val raw = readString(element).orEmpty()
+            .replace(",", "")
+            .replace("¥", "")
+            .replace("￥", "")
+        return raw.toDoubleOrNull() ?: 0.0
+    }
+
+    private fun JsonElement.asObjectOrNull(): JsonObject? =
+        takeIf { it.isJsonObject }?.asJsonObject
+
 }

@@ -1,6 +1,8 @@
 package com.xjtu.toolbox.venue
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
@@ -46,6 +48,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.cancellation.CancellationException
 import top.yukonga.miuix.kmp.basic.*
+import top.yukonga.miuix.kmp.basic.TabRowWithContour
 import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -85,6 +88,7 @@ fun VenueScreen(
 
     // ─── 导航状态 ───
     var currentPage by remember { mutableStateOf<VenuePage>(VenuePage.VenueList) }
+    var selectedTab by remember { mutableIntStateOf(0) }
 
     // ─── 场馆列表 ───
     var venues by remember { mutableStateOf<List<VenueApi.Venue>>(emptyList()) }
@@ -102,6 +106,7 @@ fun VenueScreen(
     // ─── 预订 ───
     var bookingInProgress by remember { mutableStateOf(false) }
     var bookingResult by remember { mutableStateOf<VenueApi.BookingResult?>(null) }
+    var showBookingConfirm by remember { mutableStateOf(false) }
     val showCaptchaDialog = remember { mutableStateOf(false) }
     var pendingOrder by remember { mutableStateOf<VenueApi.PendingOrder?>(null) }
     var captchaData by remember { mutableStateOf<VenueApi.CaptchaData?>(null) }
@@ -112,6 +117,18 @@ fun VenueScreen(
     // 每次加载/关闭验证码都递增，丢弃旧协程返回的结果，避免换图后旧识别结果误提交。
     var captchaRequestToken by remember { mutableIntStateOf(0) }
     val showResultDialog = remember { mutableStateOf(false) }
+
+    // ─── 订单 ───
+    var orders by remember { mutableStateOf<List<VenueApi.OrderInfo>>(emptyList()) }
+    var ordersLoading by remember { mutableStateOf(false) }
+    var ordersLoadingMore by remember { mutableStateOf(false) }
+    var ordersError by remember { mutableStateOf<String?>(null) }
+    var ordersHasMore by remember { mutableStateOf(false) }
+    var nextOrderPage by remember { mutableIntStateOf(1) }
+    var orderDetail by remember { mutableStateOf<VenueApi.OrderInfo?>(null) }
+    var cancelTarget by remember { mutableStateOf<VenueApi.OrderInfo?>(null) }
+    var payTarget by remember { mutableStateOf<VenueApi.OrderInfo?>(null) }
+    var orderActionLoading by remember { mutableStateOf(false) }
 
     // ─── 加载函数 ───
     fun loadVenues() {
@@ -214,12 +231,80 @@ fun VenueScreen(
         }
     }
 
+    /** 加载订单第一页；保留旧列表，让刷新过程中页面仍可操作。 */
+    fun loadOrders(reset: Boolean = true) {
+        if (ordersLoading || ordersLoadingMore) return
+        if (!reset && !ordersHasMore) return
+
+        val page = if (reset) 1 else nextOrderPage
+        if (reset) {
+            ordersLoading = true
+            ordersError = null
+            nextOrderPage = 1
+            ordersHasMore = false
+        } else {
+            ordersLoadingMore = true
+            ordersError = null
+        }
+
+        scope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) { api.fetchOrders(page = page, pageSize = 20) }
+                orders = if (reset) {
+                    result.orders
+                } else {
+                    (orders + result.orders).distinctBy { it.orderId }
+                }
+                nextOrderPage = result.page + 1
+                ordersHasMore = result.hasMore
+            } catch (e: AuthExpiredException) {
+                appLoginState.handleAuthExpired(LoginType.VENUE, Routes.VENUE, onBack)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                ordersError = e.message ?: "加载订单失败"
+            } finally {
+                if (reset) ordersLoading = false else ordersLoadingMore = false
+            }
+        }
+    }
+
+    fun performCancel(order: VenueApi.OrderInfo) {
+        if (orderActionLoading) return
+        cancelTarget = null
+        orderActionLoading = true
+        scope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) { api.cancelOrder(order.orderId) }
+                Toast.makeText(context, result.message, Toast.LENGTH_SHORT).show()
+                if (result.success && selectedTab == 1) loadOrders(reset = true)
+            } catch (e: AuthExpiredException) {
+                appLoginState.handleAuthExpired(LoginType.VENUE, Routes.VENUE, onBack)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Toast.makeText(context, e.message ?: "取消订单失败", Toast.LENGTH_SHORT).show()
+            } finally {
+                orderActionLoading = false
+            }
+        }
+    }
+
+    fun openExternalUrl(url: String) {
+        try {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (e: Exception) {
+            Toast.makeText(context, "没有可用的浏览器", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     fun startBookingFlow() {
         val venue = selectedVenue
         if (venue == null) {
             android.util.Log.w("VenueScreen", "startBookingFlow: selectedVenue is null, aborted")
             return
         }
+        showBookingConfirm = false
         android.util.Log.d("VenueScreen", "startBookingFlow: venue=${venue.id} slots=${selectedSlots.size}")
         showCaptchaDialog.value = true
         val requestToken = captchaRequestToken + 1
@@ -303,6 +388,12 @@ fun VenueScreen(
     // 初始加载
     LaunchedEffect(Unit) { loadVenues() }
 
+    LaunchedEffect(selectedTab) {
+        if (selectedTab == 1 && orders.isEmpty() && !ordersLoading) {
+            loadOrders(reset = true)
+        }
+    }
+
     // 切换日期/场馆时重新加载时段
     LaunchedEffect(selectedDate) {
         if (selectedVenue != null && currentPage is VenuePage.SlotSelection) {
@@ -314,22 +405,26 @@ fun VenueScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = when (currentPage) {
+                title = if (selectedTab == 1) "我的订单" else when (currentPage) {
                     VenuePage.VenueList -> "场馆预订"
                     is VenuePage.SlotSelection -> selectedVenue?.name ?: "选择时段"
                 },
-                largeTitle = when (currentPage) {
+                largeTitle = if (selectedTab == 1) "我的订单" else when (currentPage) {
                     VenuePage.VenueList -> "场馆预订"
                     is VenuePage.SlotSelection -> selectedVenue?.name ?: "选择时段"
                 },
                 scrollBehavior = scrollBehavior,
                 navigationIcon = {
                     IconButton(onClick = {
-                        when (currentPage) {
-                            VenuePage.VenueList -> onBack()
-                            is VenuePage.SlotSelection -> {
-                                currentPage = VenuePage.VenueList
-                                selectedSlots = emptySet()
+                        if (selectedTab == 1) {
+                            selectedTab = 0
+                        } else {
+                            when (currentPage) {
+                                VenuePage.VenueList -> onBack()
+                                is VenuePage.SlotSelection -> {
+                                    currentPage = VenuePage.VenueList
+                                    selectedSlots = emptySet()
+                                }
                             }
                         }
                     }) {
@@ -337,7 +432,11 @@ fun VenueScreen(
                     }
                 },
                 actions = {
-                    if (currentPage is VenuePage.SlotSelection) {
+                    if (selectedTab == 1) {
+                        IconButton(onClick = { loadOrders(reset = true) }) {
+                            Icon(Icons.Default.Refresh, contentDescription = "刷新订单")
+                        }
+                    } else if (currentPage is VenuePage.SlotSelection) {
                         IconButton(onClick = { loadSlots() }) {
                             Icon(Icons.Default.Refresh, contentDescription = "刷新")
                         }
@@ -368,12 +467,14 @@ fun VenueScreen(
             ) {
                 Column(Modifier.padding(bottom = 16.dp).navigationBarsPadding()) {
                     Text(
-                        "场馆预约功能仅提供时段查询与预约操作。",
+                        "场馆预约支持时段查询、预约和订单管理。",
                         style = MiuixTheme.textStyles.body1
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "• 不会提供自动抢选功能\n• 不会接入支付流程\n\n望理解，请尽量在校园网环境下使用。",
+                        "• 验证码自动识别可在设置中开启（默认关闭）\n" +
+                            "• 支付和登录会在系统浏览器中完成\n\n" +
+                            "望理解，请尽量在校园网环境下使用。",
                         style = MiuixTheme.textStyles.body2,
                         color = MiuixTheme.colorScheme.onSurfaceVariantSummary
                     )
@@ -388,55 +489,92 @@ fun VenueScreen(
                 }
             }
         }
-        AnimatedContent(
-            targetState = currentPage,
-            transitionSpec = {
-                if (targetState is VenuePage.SlotSelection) {
-                    (slideInHorizontally { it / 3 } + fadeIn()) togetherWith
-                            (slideOutHorizontally { -it / 3 } + fadeOut())
-                } else {
-                    (slideInHorizontally { -it / 3 } + fadeIn()) togetherWith
-                            (slideOutHorizontally { it / 3 } + fadeOut())
-                }
-            },
-            label = "VenuePage"
-        ) { page ->
-            when (page) {
-                VenuePage.VenueList -> VenueListContent(
-                    venues = venues,
-                    isLoading = venueLoading,
-                    error = venueError,
-                    onRetry = { loadVenues() },
-                    onVenueSelected = { venue ->
-                        selectedVenue = venue
-                        currentPage = VenuePage.SlotSelection
-                        loadSlots()
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MiuixTheme.colorScheme.surfaceVariant
+            ) {
+                TabRowWithContour(
+                    tabs = listOf("场馆预订", "我的订单"),
+                    selectedTabIndex = selectedTab,
+                    onTabSelected = { index ->
+                        selectedTab = index
+                        if (index == 1 && orders.isEmpty() && !ordersLoading) {
+                            loadOrders(reset = true)
+                        }
                     },
-                    favoriteIds = favoriteIds,
-                    onToggleFavorite = { venue ->
-                        val isFavorite = favoritesManager.toggleFavorite(venue.id)
-                        showFavoriteToast.value = if (isFavorite) "已收藏 ${venue.name}" else "已取消收藏 ${venue.name}"
-                    },
-                    modifier = Modifier.padding(padding),
-                    scrollBehavior = scrollBehavior
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
                 )
+            }
 
-                is VenuePage.SlotSelection -> SlotSelectionContent(
-                    venue = selectedVenue!!,
-                    date = selectedDate,
-                    onDateChange = { selectedDate = it },
-                    availableSlots = availableSlots,
-                    selectedSlots = selectedSlots,
-                    onToggleSlot = { slot ->
-                        selectedSlots = if (slot in selectedSlots) selectedSlots - slot else selectedSlots + slot
-                    },
-                    isLoading = slotsLoading,
-                    error = slotsError,
-                    onRetry = { loadSlots() },
-                    onConfirm = { startBookingFlow() },
-                    modifier = Modifier.padding(padding),
+            if (selectedTab == 1) {
+                VenueOrdersContent(
+                    orders = orders,
+                    isLoading = ordersLoading,
+                    isLoadingMore = ordersLoadingMore,
+                    error = ordersError,
+                    hasMore = ordersHasMore,
+                    onRetry = { loadOrders(reset = true) },
+                    onLoadMore = { loadOrders(reset = false) },
+                    onDetail = { orderDetail = it },
+                    onCancel = { cancelTarget = it },
+                    onPay = { payTarget = it },
+                    modifier = Modifier.weight(1f),
                     scrollBehavior = scrollBehavior
                 )
+            } else {
+                AnimatedContent(
+                    targetState = currentPage,
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    transitionSpec = {
+                        if (targetState is VenuePage.SlotSelection) {
+                            (slideInHorizontally { it / 3 } + fadeIn()) togetherWith
+                                    (slideOutHorizontally { -it / 3 } + fadeOut())
+                        } else {
+                            (slideInHorizontally { -it / 3 } + fadeIn()) togetherWith
+                                    (slideOutHorizontally { it / 3 } + fadeOut())
+                        }
+                    },
+                    label = "VenuePage"
+                ) { page ->
+                    when (page) {
+                        VenuePage.VenueList -> VenueListContent(
+                            venues = venues,
+                            isLoading = venueLoading,
+                            error = venueError,
+                            onRetry = { loadVenues() },
+                            onVenueSelected = { venue ->
+                                selectedVenue = venue
+                                currentPage = VenuePage.SlotSelection
+                                loadSlots()
+                            },
+                            favoriteIds = favoriteIds,
+                            onToggleFavorite = { venue ->
+                                val isFavorite = favoritesManager.toggleFavorite(venue.id)
+                                showFavoriteToast.value = if (isFavorite) "已收藏 ${venue.name}" else "已取消收藏 ${venue.name}"
+                            },
+                            modifier = Modifier.fillMaxSize(),
+                            scrollBehavior = scrollBehavior
+                        )
+
+                        is VenuePage.SlotSelection -> SlotSelectionContent(
+                            venue = selectedVenue!!,
+                            date = selectedDate,
+                            onDateChange = { selectedDate = it },
+                            availableSlots = availableSlots,
+                            selectedSlots = selectedSlots,
+                            onToggleSlot = { slot ->
+                                selectedSlots = if (slot in selectedSlots) selectedSlots - slot else selectedSlots + slot
+                            },
+                            isLoading = slotsLoading,
+                            error = slotsError,
+                            onRetry = { loadSlots() },
+                            onConfirm = { showBookingConfirm = true },
+                            modifier = Modifier.fillMaxSize(),
+                            scrollBehavior = scrollBehavior
+                        )
+                    }
+                }
             }
         }
 
@@ -444,6 +582,57 @@ fun VenueScreen(
         // renderInRootScaffold=true，靠 Scaffold 提供的 LocalDialogStates 注册、
         // 由 Scaffold 内部的 MiuixPopupHost 渲染。放在 Scaffold 外面（与它平级）时
         // 拿到的是静态默认空列表，弹窗会被静默丢弃——不报错、不崩溃、就是不显示。
+
+        // ─── 预约确认 ───
+        if (showBookingConfirm) {
+            BackHandler { showBookingConfirm = false }
+            OverlayDialog(
+                title = "确认预订",
+                show = true,
+                onDismissRequest = { showBookingConfirm = false }
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        "确定预订以下 ${selectedSlots.size} 个时段吗？",
+                        style = MiuixTheme.textStyles.body1,
+                        fontWeight = FontWeight.Medium
+                    )
+                    selectedSlots.sortedWith(compareBy({ it.date }, { it.timeSlot }, { it.areaName }))
+                        .forEach { slot ->
+                            Text(
+                                listOf(slot.date, slot.timeSlot, slot.areaName)
+                                    .filter { it.isNotBlank() }
+                                    .joinToString("  "),
+                                style = MiuixTheme.textStyles.body2,
+                                color = MiuixTheme.colorScheme.onSurfaceVariantActions
+                            )
+                        }
+                    Text(
+                        "合计：¥${"%.2f".format(selectedSlots.sumOf { it.price })}",
+                        style = MiuixTheme.textStyles.body1,
+                        color = MiuixTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        TextButton(
+                            text = "再看看",
+                            onClick = { showBookingConfirm = false },
+                            modifier = Modifier.weight(1f)
+                        )
+                        Button(
+                            onClick = { startBookingFlow() },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("继续预约") }
+                    }
+                }
+            }
+        }
 
         // ─── 验证码弹窗 ───
         if (showCaptchaDialog.value) {
@@ -555,9 +744,10 @@ fun VenueScreen(
                         }
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            "请前往「移动交通大学」App 完成支付",
+                            if (result.price > 0) "订单需要支付，可在订单页继续操作" else "订单已提交",
                             style = MiuixTheme.textStyles.footnote1,
-                            color = MiuixTheme.colorScheme.error,
+                            color = if (result.price > 0) MiuixTheme.colorScheme.error
+                                    else MiuixTheme.colorScheme.onSurfaceVariantSummary,
                             fontWeight = FontWeight.Medium,
                             textAlign = TextAlign.Center
                         )
@@ -571,6 +761,21 @@ fun VenueScreen(
                         Text(result.message, style = MiuixTheme.textStyles.body2, textAlign = TextAlign.Center, color = MiuixTheme.colorScheme.error)
                     }
                     Spacer(Modifier.height(8.dp))
+                    if (result.success && result.orderId != null && result.price > 0) {
+                        Button(
+                            onClick = {
+                                showResultDialog.value = false
+                                payTarget = VenueApi.OrderInfo(
+                                    orderId = result.orderId,
+                                    status = 0,
+                                    createdAt = "",
+                                    price = result.price,
+                                    details = emptyList()
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("去支付") }
+                    }
                     Button(
                         onClick = {
                             showResultDialog.value = false
@@ -581,6 +786,168 @@ fun VenueScreen(
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("确定") }
+                }
+            }
+        }
+
+        // ─── 订单详情 ───
+        orderDetail?.let { order ->
+            BackHandler { orderDetail = null }
+            OverlayDialog(
+                title = "订单详情",
+                show = true,
+                onDismissRequest = { orderDetail = null }
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("订单号：${order.orderId}", style = MiuixTheme.textStyles.body2)
+                    Text("状态：${order.statusText}", style = MiuixTheme.textStyles.body2)
+                    if (order.createdAt.isNotBlank()) {
+                        Text("下单时间：${order.createdAt}", style = MiuixTheme.textStyles.body2)
+                    }
+                    if (order.venueName.isNotBlank()) {
+                        Text("场馆：${order.venueName}", style = MiuixTheme.textStyles.body2)
+                    }
+                    Spacer(Modifier.height(2.dp))
+                    if (order.details.isEmpty()) {
+                        Text(
+                            "暂无场地明细",
+                            style = MiuixTheme.textStyles.footnote1,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary
+                        )
+                    } else {
+                        order.details.forEachIndexed { index, detail ->
+                            val line = listOf(
+                                detail.date,
+                                detail.timeSlot,
+                                detail.areaName
+                            ).filter { it.isNotBlank() }.joinToString("  ")
+                            Text(
+                                "${index + 1}. ${line.ifBlank { "场地明细" }}  ¥${"%.2f".format(detail.price)}",
+                                style = MiuixTheme.textStyles.body2
+                            )
+                        }
+                    }
+                    Text(
+                        "合计：¥${"%.2f".format(order.price)}",
+                        style = MiuixTheme.textStyles.body1,
+                        color = MiuixTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (order.canPay) {
+                            Button(
+                                onClick = {
+                                    orderDetail = null
+                                    payTarget = order
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) { Text("去支付") }
+                        }
+                        if (order.canCancel) {
+                            TextButton(
+                                text = "取消订单",
+                                onClick = {
+                                    orderDetail = null
+                                    cancelTarget = order
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        if (!order.canPay && !order.canCancel) {
+                            Button(
+                                onClick = { orderDetail = null },
+                                modifier = Modifier.fillMaxWidth()
+                            ) { Text("关闭") }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ─── 取消确认 ───
+        cancelTarget?.let { order ->
+            BackHandler { if (!orderActionLoading) cancelTarget = null }
+            OverlayDialog(
+                title = "取消订单",
+                show = true,
+                onDismissRequest = { if (!orderActionLoading) cancelTarget = null }
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        "确定要取消订单 ${order.orderId} 吗？",
+                        style = MiuixTheme.textStyles.body2
+                    )
+                    Text(
+                        "已支付金额将按系统规则原路退回，一般需要 3 个工作日。",
+                        style = MiuixTheme.textStyles.footnote1,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        TextButton(
+                            text = "取消",
+                            onClick = { cancelTarget = null },
+                            modifier = Modifier.weight(1f)
+                        )
+                        Button(
+                            onClick = { performCancel(order) },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("确认取消") }
+                    }
+                }
+            }
+        }
+
+        // ─── 支付登录引导 ───
+        payTarget?.let { order ->
+            BackHandler { payTarget = null }
+            OverlayDialog(
+                title = "去支付",
+                show = true,
+                onDismissRequest = { payTarget = null }
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        "订单尚未支付，请先在浏览器中登录，再前往支付。",
+                        style = MiuixTheme.textStyles.body2
+                    )
+                    Text(
+                        "订单号：${order.orderId}",
+                        style = MiuixTheme.textStyles.footnote1,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        TextButton(
+                            text = "去登录",
+                            onClick = { openExternalUrl(VenueApi.BROWSER_LOGIN_URL) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        Button(
+                            onClick = {
+                                payTarget = null
+                                openExternalUrl(api.paymentUrl(order.orderId))
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("去支付") }
+                    }
                 }
             }
         }
